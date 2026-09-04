@@ -85,6 +85,10 @@ fn link_platform() {
         }
         Ok("windows") => {
             println!("cargo:rustc-link-lib=static=ggml-vulkan");
+            // ggml-cpu reads the CPU name from the registry; the Vulkan loader is opened at runtime.
+            for lib in ["advapi32", "ole32", "shell32"] {
+                println!("cargo:rustc-link-lib={lib}");
+            }
             if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
                 for lib in ["stdc++", "gomp", "winpthread"] {
                     println!("cargo:rustc-link-lib=static={lib}");
