@@ -109,14 +109,16 @@ def gemm_transb_bias():
     w = f32(6, 4)
     b = f32(6)
     nodes = [helper.make_node("Gemm", ["x", "w", "b"], ["y"], alpha=1.0, beta=1.0, transB=1)]
-    return model(nodes, [tin("x", [3, 4])], [tin("y", [3, 6])], [const("w", w), const("b", b)]), {"x": f32(3, 4)}, 1e-5, 1e-4
+    # tolerance is f16 weight rounding: `weights=f16` is the default and w is standard normal
+    return model(nodes, [tin("x", [3, 4])], [tin("y", [3, 6])], [const("w", w), const("b", b)]), {"x": f32(3, 4)}, 5e-3, 1e-2
 
 
 @case
 def matmul_const_weight():
     w = f32(4, 6)
     nodes = [helper.make_node("MatMul", ["x", "w"], ["y"])]
-    return model(nodes, [tin("x", [1, 3, 4])], [tin("y", [1, 3, 6])], [const("w", w)]), {"x": f32(1, 3, 4)}, 1e-5, 1e-4
+    # tolerance is f16 weight rounding (see gemm_transb_bias)
+    return model(nodes, [tin("x", [1, 3, 4])], [tin("y", [1, 3, 6])], [const("w", w)]), {"x": f32(1, 3, 4)}, 5e-3, 1e-2
 
 
 @case
@@ -179,6 +181,26 @@ def gather_embedding():
     nodes = [helper.make_node("Gather", ["table", "ids"], ["y"], axis=0)]
     ids = np.array([[3, 7, 0, 49]], dtype=np.int64)
     return model(nodes, [tin("ids", [1, 4], TensorProto.INT64)], [tin("y", [1, 4, 8])], [const("table", table)]), {"ids": ids}, 0, 0
+
+
+@case
+def gather_single_token_embedding():
+    # whisper's decoder_with_past: one token, indices of shape [1, 1]. The
+    # Gather output must keep rank 3 ([1, 1, d]) even though it holds a single
+    # row, or the following Reshape's 0 entries copy the wrong dims.
+    table = f32(50, 8)
+    nodes = [
+        helper.make_node("Gather", ["table", "ids"], ["e"], axis=0),
+        helper.make_node("Reshape", ["e", "sh"], ["y"]),
+    ]
+    inits = [const("table", table), const("sh", np.array([0, 0, 2, 4], dtype=np.int64))]
+    ids = np.array([[7]], dtype=np.int64)
+    return (
+        model(nodes, [tin("ids", [1, 1], TensorProto.INT64)], [tin("y", [1, 1, 2, 4])], inits),
+        {"ids": ids},
+        0,
+        0,
+    )
 
 
 @case
@@ -490,11 +512,50 @@ def sin_cos_scale():
     return model(nodes, [tin("x", [3, 9])], [tin("y", [3, 9])], [const("k", np.array([2.0], dtype=np.float32))]), {"x": f32(3, 9)}, 1e-5, 1e-5
 
 
+@case
+def layer_norm_decomposed():
+    # what torch exports below opset 17; the compiler fuses it back into one
+    # LayerNormalization, so none of Pow/Sqrt/Div ever reaches the host
+    nodes = [
+        helper.make_node("ReduceMean", ["x"], ["m"], axes=[-1]),
+        helper.make_node("Sub", ["x", "m"], ["d"]),
+        helper.make_node("Pow", ["d", "two"], ["p"]),
+        helper.make_node("ReduceMean", ["p"], ["v"], axes=[-1]),
+        helper.make_node("Add", ["v", "eps"], ["ve"]),
+        helper.make_node("Sqrt", ["ve"], ["s"]),
+        helper.make_node("Div", ["d", "s"], ["n"]),
+        helper.make_node("Mul", ["n", "w"], ["nw"]),
+        helper.make_node("Add", ["nw", "b"], ["y"]),
+    ]
+    inits = [
+        const("two", np.float32(2.0)),
+        const("eps", np.float32(1e-5)),
+        const("w", f32(8)),
+        const("b", f32(8)),
+    ]
+    return model(nodes, [tin("x", [2, 5, 8])], [tin("y", [2, 5, 8])], inits), {"x": f32(2, 5, 8)}, 1e-5, 1e-4
+
+
+@case
+def matmul_f16_weights():
+    # weights=f16 stores the 2-D matmul weight as GGML_TYPE_F16 on the device;
+    # tolerance is that of an f16 weight matrix, the accumulation stays f32.
+    # (set through the environment: `weights` is not in ep::options::KEYS yet)
+    import os
+
+    os.environ["ORT_GGML_WEIGHTS"] = "f16"
+    nodes = [helper.make_node("MatMul", ["x", "w"], ["y"])]
+    w = (rng.standard_normal((256, 256)) * 0.05).astype(np.float32)
+    m = model(nodes, [tin("x", [4, 256])], [tin("y", [4, 256])], [const("w", w)])
+    return m, {"x": f32(4, 256)}, 1e-2, 1e-2
+
+
 def run_case(name, fn) -> tuple[bool, list[str]]:
     lines = []
     try:
-        mbytes, feeds, atol, rtol = fn()
-        cpu, g = C.sessions(mbytes)
+        mbytes, feeds, atol, rtol, *rest = fn()
+        cpu, g = C.sessions(mbytes, rest[0] if rest else None)
+
         ref = cpu.run(None, feeds)
         out = g.run(None, feeds)
         names = [o.name for o in cpu.get_outputs()]

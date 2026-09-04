@@ -15,6 +15,15 @@ use crate::error::{Error, Result};
 /// one to three ggml nodes.
 pub const GRAPH_SIZE: usize = 32768;
 
+/// How resident matmul weights are stored on the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightPrecision {
+    F32,
+    /// Half the memory traffic, and the type Metal's matmul kernels want. Only
+    /// the 2-D matmul weights are converted; biases and norms stay f32.
+    F16,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Device {
     /// GPU if any is present, else CPU.
@@ -35,11 +44,20 @@ pub struct Options {
     /// Add the ACCEL backends (BLAS on macOS) to the scheduler. They only take
     /// matmuls, and the split costs more than they save on this workload.
     pub accel: bool,
+    /// Storage type for the 2-D weight matrices `ggml_mul_mat` reads as src0.
+    pub weights: WeightPrecision,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { device: Device::Auto, threads: default_threads(), partial: false, dump: false, accel: false }
+        Options {
+            device: Device::Auto,
+            threads: default_threads(),
+            partial: false,
+            dump: false,
+            accel: false,
+            weights: WeightPrecision::F16,
+        }
     }
 }
 
@@ -49,7 +67,8 @@ fn default_threads() -> i32 {
 }
 
 impl Options {
-    /// Environment overrides: ORT_GGML_DEVICE, ORT_GGML_THREADS, ORT_GGML_PARTIAL, ORT_GGML_DUMP, ORT_GGML_ACCEL.
+    /// Environment overrides: ORT_GGML_DEVICE, ORT_GGML_THREADS, ORT_GGML_PARTIAL,
+    /// ORT_GGML_DUMP, ORT_GGML_ACCEL, ORT_GGML_WEIGHTS.
     pub fn from_env() -> Options {
         let mut o = Options::default();
         o.apply("device", std::env::var("ORT_GGML_DEVICE").ok().as_deref());
@@ -57,6 +76,7 @@ impl Options {
         o.apply("partial", std::env::var("ORT_GGML_PARTIAL").ok().as_deref());
         o.apply("dump", std::env::var("ORT_GGML_DUMP").ok().as_deref());
         o.apply("accel", std::env::var("ORT_GGML_ACCEL").ok().as_deref());
+        o.apply("weights", std::env::var("ORT_GGML_WEIGHTS").ok().as_deref());
         o
     }
 
@@ -83,6 +103,16 @@ impl Options {
             "partial" => self.partial = matches!(v.as_str(), "1" | "true" | "yes"),
             "dump" => self.dump = matches!(v.as_str(), "1" | "true" | "yes"),
             "accel" => self.accel = matches!(v.as_str(), "1" | "true" | "yes"),
+            "weights" => {
+                self.weights = match v.as_str() {
+                    "f16" | "fp16" | "half" | "" => WeightPrecision::F16,
+                    "f32" | "fp32" | "float" => WeightPrecision::F32,
+                    other => {
+                        tracing::warn!(value = other, "unknown weights option, using f16");
+                        WeightPrecision::F16
+                    }
+                }
+            }
             other => tracing::warn!(key = other, "unknown option"),
         }
     }

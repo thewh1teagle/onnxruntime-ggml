@@ -2,6 +2,7 @@
 //!
 //! - `backend` : ggml backends (Metal/Vulkan + CPU) and a scheduler
 //! - `fold`    : logical shapes of any rank on 4-dimensional ggml tensors
+//! - `fusion`  : compile-time pattern rewrites (GELU, LayerNorm)
 //! - `ggml`    : safe helpers over ggml tensors (shape convention, views, cont)
 //! - `program` : compile an `ir::Graph`: fold constants, rewrite patterns,
 //!               upload weights once
@@ -12,6 +13,7 @@
 
 pub mod backend;
 pub mod fold;
+pub mod fusion;
 pub mod ggml;
 pub mod ops_binary;
 pub mod ops_nn;

@@ -17,6 +17,20 @@ onnxruntime stores them as session config entries `ep.ggml.<key>`, which is also
 | `partial` | `0`, `1` | `0` | claim supported nodes even when some ops are unsupported (copies at every boundary) |
 | `dump` | `0`, `1` | `0` | log every intermediate value at trace level |
 | `accel` | `0`, `1` | `0` | add ggml's ACCEL backends (BLAS on macOS) to the scheduler |
+| `weights` | `f32`, `f16` | `f16` | storage type of the resident 2-D matmul weights |
+
+### `weights`
+
+`f16` stores every 2-D weight matrix `ggml_mul_mat` reads as src0 (the
+pre-transposed MatMul weights and Gemm B operands with `transB=1`) as
+`GGML_TYPE_F16` on the device, halving the resident bytes. Biases, norm scales
+and anything a name is also used for elsewhere stay `f32`.
+
+`ggml_mul_mat` takes an f16 src0 against an f32 src1 on both Metal and CPU, so
+nothing else changes. On the whisper-large-v3-turbo encoder (Metal, M4 Pro) this
+takes the resident weights from 2.37 GiB to 1.20 GiB and one window from 688 ms
+to 623 ms. Set `f32` if the extra rounding matters: the weights are rounded
+once, so the error is that of an f16 weight matrix, not of f16 accumulation.
 
 ## Environment
 
@@ -24,7 +38,7 @@ Lower precedence than session options.
 
 | variable | meaning |
 |---|---|
-| `ORT_GGML_DEVICE`, `ORT_GGML_THREADS`, `ORT_GGML_PARTIAL`, `ORT_GGML_DUMP`, `ORT_GGML_ACCEL` | the options above |
+| `ORT_GGML_DEVICE`, `ORT_GGML_THREADS`, `ORT_GGML_PARTIAL`, `ORT_GGML_DUMP`, `ORT_GGML_ACCEL`, `ORT_GGML_WEIGHTS` | the options above |
 | `ORT_GGML_LOG` | tracing filter: `info` (default), `debug`, `trace`, or a full `EnvFilter` directive |
 | `ORT_GGML_CPU_VARIANT` | x86_64 only: `avx2` or `baseline` to override CPU feature detection |
 | `ONNXRUNTIME_GGML_LIBRARY` | path of the provider library, instead of the one bundled in the wheel |

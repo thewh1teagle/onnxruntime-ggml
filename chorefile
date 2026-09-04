@@ -69,6 +69,39 @@ task model {
     download gh://$repo/$models_tag/$model_name models/$model_name --timeout 600
 }
 
+whisper_repo=onnx-community/whisper-large-v3-turbo
+whisper_dir=models/whisper-large-v3-turbo
+
+# Fetch the whisper-large-v3-turbo ONNX export (fp32) and tokenizer used by the whisper example and bench.
+task whisper-model {
+    if exists $whisper_dir/onnx/decoder_with_past_model.onnx {
+        echo "$whisper_dir is already here"
+        return
+    }
+    mkdir $whisper_dir/onnx
+    for name in config.json generation_config.json preprocessor_config.json tokenizer.json tokenizer_config.json special_tokens_map.json added_tokens.json vocab.json merges.txt normalizer.json {
+        download https://huggingface.co/$whisper_repo/resolve/main/$name $whisper_dir/$name --timeout 300
+    }
+    for name in encoder_model.onnx encoder_model.onnx_data decoder_model.onnx decoder_with_past_model.onnx {
+        download https://huggingface.co/$whisper_repo/resolve/main/onnx/$name $whisper_dir/onnx/$name --timeout 3600
+    }
+    echo "fetched $whisper_dir"
+}
+
+# Transcribe a wav with whisper-large-v3-turbo on ggml: whisper <wav> [provider].
+task whisper wav provider=ggml {
+    whisper-model
+    build
+    uv run examples/whisper.py $1 --provider $2
+}
+
+# Benchmark whisper-large-v3-turbo: vibe-server (whisper.cpp) vs onnxruntime CPU vs ggml: bench-whisper [wav].
+task bench-whisper wav=/Users/yqbqwlny/Documents/projects/audio/vibe/server/fixtures/multi.wav {
+    whisper-model
+    build
+    uv run tests/bench_whisper.py $1
+}
+
 # Compare pocket-tts outputs between the CPU provider and ggml, then time both.
 task compare frames=12 {
     model

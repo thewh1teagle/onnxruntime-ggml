@@ -3,7 +3,7 @@
 //! 1. fold every node whose inputs are all constants (the export's shape
 //!    arithmetic mostly disappears here)
 //! 2. rewrite patterns ggml has a kernel for (GELU) and pre-transpose MatMul
-//!    weights into the layout `ggml_mul_mat` wants
+//!    weights into the layout `ggml_mul_mat` wants (see `exec::fusion`)
 //! 3. drop constants nothing reads any more
 //! 4. upload the float constants to the primary backend, once
 
@@ -14,14 +14,15 @@ use std::time::Instant;
 use ggml_sys as g;
 
 use crate::error::{Error, Result};
-use crate::exec::backend::Backend;
+use crate::exec::backend::{Backend, WeightPrecision};
+use crate::exec::fusion;
 use crate::exec::ggml::{self, Ctx};
 use crate::exec::runtime::Run;
 use crate::exec::value::DeviceTensor;
 use crate::host::eval;
 use crate::host::eval_shape::transpose;
 use crate::host::tensor::HostTensor;
-use crate::ir::{DType, Graph, Node};
+use crate::ir::{DType, Graph};
 use crate::logging::bytes;
 
 pub struct Weights {
@@ -29,6 +30,9 @@ pub struct Weights {
     pub buffer: g::ggml_backend_buffer_t,
     pub tensors: HashMap<String, DeviceTensor>,
     pub nbytes: usize,
+    /// How many of them are stored as F16, and how many bytes that is.
+    pub n_f16: usize,
+    pub f16_bytes: usize,
 }
 
 unsafe impl Send for Weights {}
@@ -53,10 +57,13 @@ pub struct CompileStats {
     pub nodes_out: usize,
     pub folded: usize,
     pub gelu_fused: usize,
+    pub layer_norms_fused: usize,
     pub weights_transposed: usize,
     pub constants: usize,
     pub weights_uploaded: usize,
     pub weight_bytes: usize,
+    pub weights_f16: usize,
+    pub weight_f16_bytes: usize,
     pub millis: f64,
 }
 
@@ -84,7 +91,8 @@ impl Program {
         );
 
         stats.folded = fold_constants(&mut graph)?;
-        stats.gelu_fused = fuse_gelu(&mut graph);
+        stats.gelu_fused = fusion::fuse_gelu(&mut graph);
+        stats.layer_norms_fused = fusion::fuse_layer_norm(&mut graph);
         stats.weights_transposed = pretranspose_weights(&mut graph)?;
         prune_constants(&mut graph);
         stats.constants = graph.constants.len();
@@ -93,6 +101,8 @@ impl Program {
         let weights = upload_weights(&graph, &backend)?;
         stats.weights_uploaded = weights.tensors.len();
         stats.weight_bytes = weights.nbytes;
+        stats.weights_f16 = weights.n_f16;
+        stats.weight_f16_bytes = weights.f16_bytes;
         let last_use = graph.last_use();
         stats.millis = started.elapsed().as_secs_f64() * 1000.0;
         tracing::info!(
@@ -100,9 +110,12 @@ impl Program {
             nodes_out = stats.nodes_out,
             folded = stats.folded,
             gelu_fused = stats.gelu_fused,
+            layer_norms_fused = stats.layer_norms_fused,
             weights_transposed = stats.weights_transposed,
             weights = stats.weights_uploaded,
             weight_bytes = %bytes(stats.weight_bytes),
+            weights_f16 = stats.weights_f16,
+            weight_f16_bytes = %bytes(stats.weight_f16_bytes),
             ms = format!("{:.1}", stats.millis),
             "compiled"
         );
@@ -151,124 +164,6 @@ pub fn fold_constants(graph: &mut Graph) -> Result<usize> {
     graph.nodes = kept;
     tracing::info!(folded, remaining = graph.nodes.len(), "constant folding");
     Ok(folded)
-}
-
-fn const_scalar(graph: &Graph, name: &str) -> Option<f64> {
-    graph.constants.get(name).filter(|t| t.numel() == 1).and_then(|t| t.scalar_f64().ok())
-}
-
-fn near(a: f64, b: f64) -> bool {
-    (a - b).abs() < 1e-4 * b.abs().max(1.0)
-}
-
-/// `0.5 * x * (1 + erf(x / sqrt(2)))` in the shapes torch exports it, into one GeluErf node.
-pub fn fuse_gelu(graph: &mut Graph) -> usize {
-    let mut fused = 0usize;
-    loop {
-        let producers = graph.producers();
-        let consumers = graph.consumer_counts();
-        let mut found: Option<(Vec<usize>, String, String, String)> = None;
-        for (ei, erf) in graph.nodes.iter().enumerate() {
-            if erf.op != "Erf" {
-                continue;
-            }
-            let Some(&di) = erf.input(0).and_then(|n| producers.get(n)) else { continue };
-            let div = &graph.nodes[di];
-            let x = match div.op.as_str() {
-                "Div" if const_scalar(graph, &div.inputs[1]).is_some_and(|c| near(c, std::f64::consts::SQRT_2)) => {
-                    div.inputs[0].clone()
-                }
-                "Mul" if const_scalar(graph, &div.inputs[1]).is_some_and(|c| near(c, std::f64::consts::FRAC_1_SQRT_2)) => {
-                    div.inputs[0].clone()
-                }
-                "Mul" if const_scalar(graph, &div.inputs[0]).is_some_and(|c| near(c, std::f64::consts::FRAC_1_SQRT_2)) => {
-                    div.inputs[1].clone()
-                }
-                _ => continue,
-            };
-            let erf_out = &erf.outputs[0];
-            if consumers.get(erf_out.as_str()) != Some(&1) || consumers.get(div.outputs[0].as_str()) != Some(&1) {
-                continue;
-            }
-            let Some((ai, add)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Add" && n.inputs.contains(erf_out))
-            else {
-                continue;
-            };
-            let other = if add.inputs[0] == *erf_out { &add.inputs[1] } else { &add.inputs[0] };
-            if !const_scalar(graph, other).is_some_and(|c| near(c, 1.0)) || consumers.get(add.outputs[0].as_str()) != Some(&1) {
-                continue;
-            }
-            let add_out = add.outputs[0].clone();
-            let Some((mi, mul)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Mul" && n.inputs.contains(&add_out))
-            else {
-                continue;
-            };
-            let other = if mul.inputs[0] == add_out { mul.inputs[1].clone() } else { mul.inputs[0].clone() };
-            let mut remove = vec![di, ei, ai, mi];
-            #[allow(clippy::needless_late_init)]
-            let out_name;
-            if other == x {
-                // (x * (1 + erf)) * 0.5
-                if consumers.get(mul.outputs[0].as_str()) != Some(&1) {
-                    continue;
-                }
-                let mul_out = mul.outputs[0].clone();
-                let Some((hi, half)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Mul" && n.inputs.contains(&mul_out))
-                else {
-                    continue;
-                };
-                let hother = if half.inputs[0] == mul_out { &half.inputs[1] } else { &half.inputs[0] };
-                if !const_scalar(graph, hother).is_some_and(|c| near(c, 0.5)) {
-                    continue;
-                }
-                remove.push(hi);
-                out_name = half.outputs[0].clone();
-            } else {
-                // (x * 0.5) * (1 + erf)
-                let Some(&hi) = producers.get(other.as_str()) else { continue };
-                let half = &graph.nodes[hi];
-                if half.op != "Mul" {
-                    continue;
-                }
-                let hx = if half.inputs[0] == x {
-                    &half.inputs[1]
-                } else if half.inputs[1] == x {
-                    &half.inputs[0]
-                } else {
-                    continue;
-                };
-                if !const_scalar(graph, hx).is_some_and(|c| near(c, 0.5)) || consumers.get(other.as_str()) != Some(&1) {
-                    continue;
-                }
-                remove.push(hi);
-                out_name = mul.outputs[0].clone();
-            }
-            found = Some((remove, x, out_name, erf.name.clone()));
-            break;
-        }
-        let Some((remove, x, out, name)) = found else { break };
-        let first = *remove.iter().min().unwrap();
-        let mut gelu = Node::new("GeluErf", &format!("{name}_gelu"), &[&x], &[&out]);
-        gelu.domain = String::new();
-        let removed: HashSet<usize> = remove.into_iter().collect();
-        let mut nodes = Vec::with_capacity(graph.nodes.len());
-        for (i, n) in graph.nodes.drain(..).enumerate() {
-            if i == first {
-                nodes.push(gelu.clone());
-            }
-            if !removed.contains(&i) {
-                nodes.push(n);
-            }
-        }
-        // the fused node must come after x's producer: `first` is the Div/Mul that consumed x, so it does
-        graph.nodes = nodes;
-        fused += 1;
-        tracing::trace!(x, out, "fused GeluErf");
-    }
-    if fused > 0 {
-        tracing::info!(fused, "gelu fusion");
-    }
-    fused
 }
 
 /// `ggml_mul_mat` wants the weight as `[N, K]` row-major (ONNX Gemm transB=1).
@@ -334,11 +229,52 @@ pub fn prune_constants(graph: &mut Graph) {
     tracing::debug!(before, after = graph.constants.len(), "constants pruned");
 }
 
+/// The 2-D weight matrices `ggml_mul_mat` reads as src0: MatMul operands
+/// pre-transposed by `pretranspose_weights`, and Gemm B operands with
+/// `transB=1`. Only these are candidates for F16 storage; a name used anywhere
+/// else keeps its F32 copy, because the emitters there assume F32 data.
+fn mul_mat_weights(graph: &Graph) -> HashSet<String> {
+    let mut src0: HashSet<&str> = HashSet::new();
+    let mut other: HashSet<&str> = HashSet::new();
+    for node in &graph.nodes {
+        let b = match node.op.as_str() {
+            "MatMul" if node.attr_i("__b_transposed", 0) != 0 => Some(1),
+            "Gemm" if node.attr_i("transB", 0) != 0 => Some(1),
+            _ => None,
+        };
+        for (i, name) in node.inputs.iter().enumerate() {
+            if name.is_empty() {
+                continue;
+            }
+            if Some(i) == b {
+                src0.insert(name);
+            } else {
+                other.insert(name);
+            }
+        }
+    }
+    for o in &graph.outputs {
+        other.insert(o.name.as_str());
+    }
+    src0.difference(&other)
+        .filter(|n| graph.constants.get(**n).is_some_and(|t| t.rank() == 2 && t.dtype().is_float()))
+        .map(|n| (*n).to_owned())
+        .collect()
+}
+
 /// Float constants of rank <= 4 go to the primary backend once. Everything
 /// else stays host-only (ints are shape math; rank > 4 runs on the host).
+///
+/// With `weights=f16` the 2-D matmul weights are stored as F16: `ggml_mul_mat`
+/// takes an F16 src0 against an F32 src1 on both Metal and CPU, which halves
+/// the bytes read per matmul. Vectors (biases, norm scales) stay F32.
 fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
     let candidates: Vec<(&String, &HostTensor)> =
         graph.constants.iter().filter(|(_, t)| t.dtype().is_float() && t.rank() <= ggml::MAX_RANK && t.numel() > 0).collect();
+    let half = match backend.options.weights {
+        WeightPrecision::F16 => mul_mat_weights(graph),
+        WeightPrecision::F32 => HashSet::new(),
+    };
     unsafe {
         let ctx = g::ggml_init(g::ggml_init_params {
             mem_size: g::ggml_tensor_overhead() * (candidates.len() + 1),
@@ -350,7 +286,8 @@ fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
         }
         let mut tensors = HashMap::new();
         for (name, t) in &candidates {
-            let d = ggml::new_tensor(ctx, DType::F32, &t.shape)?;
+            let dtype = if half.contains(*name) { DType::F16 } else { DType::F32 };
+            let d = ggml::new_tensor(ctx, dtype, &t.shape)?;
             ggml::set_name(d.t, name);
             tensors.insert((*name).clone(), d);
         }
@@ -364,29 +301,41 @@ fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
             }
             b
         };
-        let mut nbytes = 0usize;
+        let (mut nbytes, mut n_f16, mut f16_bytes) = (0usize, 0usize, 0usize);
         for (name, t) in &candidates {
             let d = tensors[*name];
-            let data = t.as_f32();
-            let len = data.len() * 4;
-            g::ggml_backend_tensor_set(d.t, data.as_ptr().cast(), 0, len);
+            let f16 = half.contains(*name);
+            let len = if f16 {
+                let data = t.to_bytes(DType::F16)?;
+                g::ggml_backend_tensor_set(d.t, data.as_ptr().cast(), 0, data.len());
+                n_f16 += 1;
+                f16_bytes += data.len();
+                data.len()
+            } else {
+                let data = t.as_f32();
+                let len = data.len() * 4;
+                g::ggml_backend_tensor_set(d.t, data.as_ptr().cast(), 0, len);
+                len
+            };
             nbytes += len;
-            tracing::trace!(name = %name, shape = ?t.shape, bytes = len, "weight uploaded");
+            tracing::trace!(name = %name, shape = ?t.shape, bytes = len, f16, "weight uploaded");
         }
         tracing::info!(
             n = tensors.len(),
             bytes = %bytes(nbytes),
+            f16 = n_f16,
+            f16_bytes = %bytes(f16_bytes),
             backend = %backend.primary_name,
             "weights resident"
         );
-        Ok(Weights { ctx, buffer, tensors, nbytes })
+        Ok(Weights { ctx, buffer, tensors, nbytes, n_f16, f16_bytes })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Attr, ValueDesc};
+    use crate::ir::{Attr, Node, ValueDesc};
 
     fn desc(name: &str) -> ValueDesc {
         ValueDesc { name: name.into(), dtype: DType::F32, shape: vec![] }
@@ -407,25 +356,6 @@ mod tests {
         assert_eq!(folded, 1);
         assert_eq!(graph.constants["prod"].as_i64()[0], 6);
         assert_eq!(graph.nodes.len(), 1);
-    }
-
-    #[test]
-    fn fuses_gelu() {
-        let mut graph = Graph::default();
-        graph.constants.insert("sqrt2".into(), HostTensor::scalar_f32(std::f32::consts::SQRT_2));
-        graph.constants.insert("one".into(), HostTensor::scalar_f32(1.0));
-        graph.constants.insert("half".into(), HostTensor::scalar_f32(0.5));
-        graph.nodes.push(Node::new("Div", "d", &["x", "sqrt2"], &["d_out"]));
-        graph.nodes.push(Node::new("Erf", "e", &["d_out"], &["e_out"]));
-        graph.nodes.push(Node::new("Add", "a", &["e_out", "one"], &["a_out"]));
-        graph.nodes.push(Node::new("Mul", "m", &["x", "a_out"], &["m_out"]));
-        graph.nodes.push(Node::new("Mul", "h", &["m_out", "half"], &["y"]));
-        graph.outputs.push(desc("y"));
-        assert_eq!(fuse_gelu(&mut graph), 1);
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.nodes[0].op, "GeluErf");
-        assert_eq!(graph.nodes[0].inputs, vec!["x"]);
-        assert_eq!(graph.nodes[0].outputs, vec!["y"]);
     }
 
     #[test]

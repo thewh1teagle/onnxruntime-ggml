@@ -29,6 +29,7 @@ Inside `onnxruntime-ggml`:
 | `exec/program.rs` | compile: constant folding, GELU fusion, weight pre-transpose, weight upload |
 | `exec/runtime.rs` | run: placement, uploads, flushes, readbacks |
 | `exec/fold.rs` | logical shapes of any rank on 4-dimensional ggml tensors |
+| `exec/fusion.rs` | pattern fusions: GELU, decomposed LayerNorm |
 | `exec/ops_*.rs` | ONNX → ggml emitters |
 | `exec/backend.rs` | ggml backends and scheduler |
 

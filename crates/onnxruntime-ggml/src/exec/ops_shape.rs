@@ -195,12 +195,26 @@ unsafe fn slice_axes(run: &mut Run, x: DeviceTensor, start: &[usize], count: &[u
     Ok(cur)
 }
 
+/// The data shape with `axis` replaced by the whole index shape.
+fn gather_shape(data: &[usize], idx_shape: &[usize], axis: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(data.len() + idx_shape.len());
+    out.extend_from_slice(&data[..axis]);
+    out.extend_from_slice(idx_shape);
+    out.extend_from_slice(&data[axis + 1..]);
+    out
+}
+
 /// Two Gather shapes ggml can serve: a single index (a strided view) and
 /// row lookup on a 2-D table (`ggml_get_rows`). Anything else is declined and
 /// the runtime evaluates it on the host.
 fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor, axis: usize) -> Result<DeviceTensor> {
     let ctx = run.ctx;
     let dim = x.shape[axis] as i64;
+    // ONNX Gather replaces `axis` with the *whole* index shape. Index rank
+    // matters even for a single element: `[[k]]` adds two dims, not one. Every
+    // path below therefore ends on an explicit reshape to this shape instead of
+    // trusting the shape a view happens to carry.
+    let out_shape = gather_shape(&x.shape(), &idx.shape, axis);
     if idx.numel() == 1 {
         let mut k = idx.scalar_i64()?;
         if k < 0 {
@@ -218,12 +232,7 @@ fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor,
             count[axis] = 1;
             unsafe { ggml::view_slice(ctx, x, &start, &count)? }
         };
-        if idx.rank() == 0 {
-            let mut shape = x.shape();
-            shape.remove(axis);
-            return unsafe { fold::reshape_logical(ctx, v, &shape) };
-        }
-        return Ok(v);
+        return unsafe { fold::reshape_logical(ctx, v, &out_shape) };
     }
     if x.rank == 2 && axis == 0 {
         let rows = x.shape[0] as i64;
@@ -236,9 +245,7 @@ fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor,
         let id = run.upload(&flat, "gather_idx")?;
         let x = unsafe { contig(ctx, x) };
         let t = unsafe { g::ggml_get_rows(ctx, x.t, id.t) };
-        let mut shape = idx.shape.clone();
-        shape.push(cols);
-        return unsafe { fold::reshape_logical(ctx, dev(t, &[ids.len(), cols]), &shape) };
+        return unsafe { fold::reshape_logical(ctx, dev(t, &[ids.len(), cols]), &out_shape) };
     }
     let _ = DType::I32;
     Err(Error::unsupported(format!("gather axis {axis} on rank {} with {} indices", x.rank, idx.numel())))
