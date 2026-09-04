@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn compare_and_reduce() {
         let a = HostTensor::i64(vec![3], vec![1, 5, 3]);
-        let c = compare("GreaterOrEqual", &a, &HostTensor::scalar_i64(3)).unwrap();
+        let c = compare("GreaterOrEqual", &a, &HostTensor::const_i64(3)).unwrap();
         assert_eq!(c.as_bool().to_vec(), vec![false, true, true]);
         let x = HostTensor::f32(vec![2, 2], vec![1., 2., 3., 4.]);
         let m = reduce("ReduceMean", &x, Some(&[-1]), true, false).unwrap();

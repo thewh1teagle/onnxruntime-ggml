@@ -493,7 +493,7 @@ mod tests {
         let g = gather(&x, &idx, 0).unwrap();
         assert_eq!(g.shape, vec![2, 2]);
         assert_eq!(g.as_f32().to_vec(), vec![20., 21., 0., 1.]);
-        let scalar = HostTensor::scalar_i64(1);
+        let scalar = HostTensor::const_i64(1);
         let g = gather(&x, &scalar, 1).unwrap();
         assert_eq!(g.shape, vec![3]);
         assert_eq!(g.as_f32().to_vec(), vec![1., 11., 21.]);
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn range_and_where() {
-        let r = range(&HostTensor::scalar_i64(0), &HostTensor::scalar_i64(5), &HostTensor::scalar_i64(2)).unwrap();
+        let r = range(&HostTensor::const_i64(0), &HostTensor::const_i64(5), &HostTensor::const_i64(2)).unwrap();
         assert_eq!(r.as_i64().to_vec(), vec![0, 2, 4]);
         let c = HostTensor::bool(vec![2], vec![true, false]);
         let w = where_(&c, &HostTensor::scalar_f32(1.0), &HostTensor::scalar_f32(-1.0)).unwrap();

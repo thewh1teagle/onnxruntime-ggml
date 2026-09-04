@@ -65,7 +65,7 @@ impl HostTensor {
     pub fn scalar_f32(v: f32) -> HostTensor {
         HostTensor::f32(vec![], vec![v])
     }
-    pub fn scalar_i64(v: i64) -> HostTensor {
+    pub fn const_i64(v: i64) -> HostTensor {
         HostTensor::i64(vec![], vec![v])
     }
     pub fn zeros(dtype: DType, shape: Vec<usize>) -> HostTensor {

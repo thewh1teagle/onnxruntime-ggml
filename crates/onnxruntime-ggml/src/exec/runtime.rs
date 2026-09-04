@@ -273,7 +273,7 @@ impl<'p> Run<'p> {
             }
             let t_alloc = started.elapsed();
             let status = g::ggml_backend_sched_graph_compute(sched, self.graph);
-            if status != g::GGML_STATUS_SUCCESS {
+            if status != g::ggml_status_GGML_STATUS_SUCCESS {
                 return Err(Error::ggml(format!("graph compute failed with status {status} ({reason})")));
             }
             let t_compute = started.elapsed() - t_alloc;

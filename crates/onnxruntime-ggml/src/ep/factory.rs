@@ -112,8 +112,7 @@ unsafe extern "C" fn get_supported_devices(
             let mut metadata: *mut OrtKeyValuePairs = std::ptr::null_mut();
             if let (Some(create), Some(add)) = (api.CreateKeyValuePairs, api.AddKeyValuePair) {
                 create(&mut metadata);
-                let v = CString::new(EP_VERSION).unwrap();
-                add(metadata, c"version".as_ptr(), v.as_ptr());
+                // onnxruntime fills in "version" itself from GetVersion and rejects it here.
                 add(metadata, c"backend".as_ptr(), c"ggml".as_ptr());
             }
             let mut ep_device: *mut OrtEpDevice = std::ptr::null_mut();

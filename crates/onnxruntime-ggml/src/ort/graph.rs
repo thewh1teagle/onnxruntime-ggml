@@ -195,8 +195,8 @@ unsafe fn import_node(node: *const OrtNode) -> Result<Node> {
     Ok(Node { name, op, domain, inputs: names_of(&ins)?, outputs: names_of(&outs)?, attrs })
 }
 
-/// Size query then read, as `ReadOpAttr` expects.
-unsafe fn read_sized(attr: *const OrtOpAttr, ty: OrtOpAttrType, elem: usize) -> Result<Vec<u8>> {
+/// Size query then read. `ReadOpAttr` counts `len` and `out` in bytes for every type.
+unsafe fn read_sized(attr: *const OrtOpAttr, ty: OrtOpAttrType, _elem: usize) -> Result<Vec<u8>> {
     let api = crate::ort::api::api();
     let f = api.ReadOpAttr.ok_or_else(|| Error::Ort("ReadOpAttr missing".into()))?;
     let mut needed = 0usize;
@@ -206,7 +206,7 @@ unsafe fn read_sized(attr: *const OrtOpAttr, ty: OrtOpAttrType, elem: usize) -> 
             release(st);
         }
     }
-    let mut buf = vec![0u8; needed * elem];
+    let mut buf = vec![0u8; needed];
     if needed > 0 {
         let mut got = 0usize;
         let st = f(attr, ty, buf.as_mut_ptr().cast(), needed, &mut got);
@@ -222,7 +222,7 @@ unsafe fn read_attr(attr: *const OrtOpAttr) -> Result<Option<Attr>> {
         ORT_OP_ATTR_INT => {
             let mut v: i64 = 0;
             let mut out = 0usize;
-            ort_call!(ReadOpAttr(attr, ty, (&mut v as *mut i64).cast(), 1, &mut out))?;
+            ort_call!(ReadOpAttr(attr, ty, (&mut v as *mut i64).cast(), std::mem::size_of::<i64>(), &mut out))?;
             Some(Attr::Int(v))
         }
         ORT_OP_ATTR_INTS => {
@@ -232,7 +232,7 @@ unsafe fn read_attr(attr: *const OrtOpAttr) -> Result<Option<Attr>> {
         ORT_OP_ATTR_FLOAT => {
             let mut v: f32 = 0.0;
             let mut out = 0usize;
-            ort_call!(ReadOpAttr(attr, ty, (&mut v as *mut f32).cast(), 1, &mut out))?;
+            ort_call!(ReadOpAttr(attr, ty, (&mut v as *mut f32).cast(), std::mem::size_of::<f32>(), &mut out))?;
             Some(Attr::Float(v))
         }
         ORT_OP_ATTR_FLOATS => {

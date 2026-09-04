@@ -169,7 +169,7 @@ fn conv(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> 
             attrs.dilation as i32,
             0,
             false,
-            g::GGML_TYPE_F32,
+            g::ggml_type_GGML_TYPE_F32,
         );
         let cols2 = g::ggml_reshape_2d(ctx, cols, (c * k) as i64, (l_out * n) as i64);
         let w2 = g::ggml_reshape_2d(ctx, wk.t, (c * k) as i64, m as i64);

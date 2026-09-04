@@ -40,9 +40,9 @@ pub fn gaxis(axis: usize, rank: usize) -> i32 {
 
 pub fn gtype(dtype: DType) -> Result<g::ggml_type> {
     Ok(match dtype {
-        DType::F32 => g::GGML_TYPE_F32,
-        DType::F16 => g::GGML_TYPE_F16,
-        DType::I32 => g::GGML_TYPE_I32,
+        DType::F32 => g::ggml_type_GGML_TYPE_F32,
+        DType::F16 => g::ggml_type_GGML_TYPE_F16,
+        DType::I32 => g::ggml_type_GGML_TYPE_I32,
         other => return Err(Error::unsupported(format!("{other} on device"))),
     })
 }

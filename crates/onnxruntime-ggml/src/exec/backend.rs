@@ -148,7 +148,7 @@ impl Backend {
             let mut gpu = false;
             if options.device != Device::Cpu {
                 for &(dev, ty) in &list {
-                    if ty == g::GGML_BACKEND_DEVICE_TYPE_GPU || ty == g::GGML_BACKEND_DEVICE_TYPE_IGPU {
+                    if ty == g::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU || ty == g::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU {
                         let b = g::ggml_backend_dev_init(dev, std::ptr::null());
                         if b.is_null() {
                             tracing::warn!(name = %dev_name(dev), "gpu backend failed to initialise");
@@ -166,7 +166,7 @@ impl Backend {
             }
             // ACCEL devices (BLAS on macOS) sit between the GPU and the CPU.
             for &(dev, ty) in &list {
-                if ty == g::GGML_BACKEND_DEVICE_TYPE_ACCEL {
+                if ty == g::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_ACCEL {
                     let b = g::ggml_backend_dev_init(dev, std::ptr::null());
                     if !b.is_null() {
                         tracing::info!(name = %dev_name(dev), "using accel backend");
@@ -174,7 +174,7 @@ impl Backend {
                     }
                 }
             }
-            let cpu = g::ggml_backend_init_by_type(g::GGML_BACKEND_DEVICE_TYPE_CPU, std::ptr::null());
+            let cpu = g::ggml_backend_init_by_type(g::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_CPU, std::ptr::null());
             if cpu.is_null() {
                 return Err(Error::ggml("no cpu backend"));
             }
