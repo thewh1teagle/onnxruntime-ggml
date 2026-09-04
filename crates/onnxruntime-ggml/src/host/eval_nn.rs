@@ -32,7 +32,11 @@ pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTenso
                 y = HostTensor::f32(y.shape.clone(), y.as_f32().iter().map(|v| v * alpha).collect());
             }
             if let Some(c) = inputs.get(2).copied().flatten() {
-                let c = if beta != 1.0 { HostTensor::f32(c.shape.clone(), c.as_f32().iter().map(|v| v * beta).collect()) } else { c.clone() };
+                let c = if beta != 1.0 {
+                    HostTensor::f32(c.shape.clone(), c.as_f32().iter().map(|v| v * beta).collect())
+                } else {
+                    c.clone()
+                };
                 y = crate::host::eval_math::binary("Add", &y, &c)?;
             }
             y

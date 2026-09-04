@@ -93,23 +93,12 @@ impl HostTensor {
         let bytes = &bytes[..need];
         let data = match dtype {
             DType::F32 => Data::F32(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()),
-            DType::F16 => Data::F32(
-                bytes
-                    .chunks_exact(2)
-                    .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
-                    .collect(),
-            ),
+            DType::F16 => Data::F32(bytes.chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32()).collect()),
             DType::F64 => Data::F64(
-                bytes
-                    .chunks_exact(8)
-                    .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                    .collect(),
+                bytes.chunks_exact(8).map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])).collect(),
             ),
             DType::I64 => Data::I64(
-                bytes
-                    .chunks_exact(8)
-                    .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                    .collect(),
+                bytes.chunks_exact(8).map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])).collect(),
             ),
             DType::I32 => Data::I32(bytes.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()),
             DType::I8 => Data::I8(bytes.iter().map(|&b| b as i8).collect()),

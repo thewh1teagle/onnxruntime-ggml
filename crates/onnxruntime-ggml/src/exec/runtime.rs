@@ -320,7 +320,8 @@ impl<'p> Run<'p> {
             self.flush(reason)?;
             for i in ins.iter_mut().flatten() {
                 if i.v.is_device() {
-                    i.v = self.values.get(&i.name).cloned().ok_or_else(|| Error::internal(format!("{} lost in flush", i.name)))?;
+                    i.v =
+                        self.values.get(&i.name).cloned().ok_or_else(|| Error::internal(format!("{} lost in flush", i.name)))?;
                 }
             }
         }
@@ -429,6 +430,29 @@ impl<'p> Run<'p> {
                 }
                 Err(e) => return Err(e),
             }
+        }
+        // Shape reads metadata only, never element data: answer it from the
+        // value's shape so a device input does not force a flush + readback.
+        if node.op == "Shape" {
+            let x = ins.first().and_then(|i| i.as_ref()).ok_or_else(|| Error::model(format!("{node}: input 0 missing")))?;
+            let shape = x.v.shape();
+            let rank = shape.len();
+            let norm = |axis: i64, default: usize| -> usize {
+                let r = rank as i64;
+                let a = if axis < 0 { axis + r } else { axis };
+                if a < 0 {
+                    0
+                } else if a > r {
+                    default.min(rank)
+                } else {
+                    a as usize
+                }
+            };
+            let start = norm(node.attr_i("start", 0), 0);
+            let end = norm(node.attr_i("end", rank as i64), rank);
+            let dims: Vec<i64> = shape[start..end.max(start)].iter().map(|&d| d as i64).collect();
+            self.stats.host_ops += 1;
+            return Ok(vec![Value::host_of(HostTensor::i64(vec![dims.len()], dims))]);
         }
         // host path
         let all: Vec<usize> = (0..ins.len()).collect();

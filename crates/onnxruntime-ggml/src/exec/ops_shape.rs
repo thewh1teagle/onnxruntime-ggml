@@ -71,7 +71,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
             if plan.step.iter().any(|&s| s != 1) {
                 return Err(Error::unsupported("slice with step != 1"));
             }
-            if plan.count.iter().any(|&c| c == 0) {
+            if plan.count.contains(&0) {
                 return Err(Error::unsupported("empty slice"));
             }
             vec![unsafe { ggml::view_slice(run.ctx, x, &plan.start, &plan.count)? }]
@@ -137,7 +137,8 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
         }
         "Expand" => {
             let x = run.dev_f32(need(node, ins, 0)?)?;
-            let target: Vec<usize> = run.host_param(need(node, ins, 1)?, "expand shape")?.as_i64().iter().map(|&v| v as usize).collect();
+            let target: Vec<usize> =
+                run.host_param(need(node, ins, 1)?, "expand shape")?.as_i64().iter().map(|&v| v as usize).collect();
             let shape = broadcast_shapes(&x.shape(), &target)?;
             if shape == x.shape() {
                 vec![x]
@@ -162,7 +163,7 @@ trait ValueExt {
 
 impl ValueExt for Value {
     fn numel_is_zero(&self) -> bool {
-        self.shape().iter().any(|&d| d == 0)
+        self.shape().contains(&0)
     }
 }
 

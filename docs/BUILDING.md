@@ -17,9 +17,10 @@ chore build            # target/release/libonnxruntime_ggml.{dylib,so,dll}
 chore test             # cargo test + tests/test_ops.py against the CPU provider
 chore model            # models/pocket-tts-english-fp32.onnx
 chore compare          # every pocket-tts output vs the CPU provider, then timing
+chore lint             # cargo fmt --check + clippy, the way CI runs them
 ```
 
-The Python tests find the freshly built library automatically (`tests/_common.py` sets `ONNXRUNTIME_GGML_LIBRARY` to `target/release/...`).
+The Python tests find the freshly built library automatically (`tests/_common.py` sets `ONNXRUNTIME_GGML_LIBRARY` to `target/release/...`). The exception is `tests/test_wheel.py`, which checks an *installed* wheel and so clears that variable; see [Verifying a wheel](RELEASING.md#verifying-a-wheel).
 
 ## Native inputs
 

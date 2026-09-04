@@ -31,10 +31,7 @@ pub unsafe fn init(base: *const OrtApiBase) -> Result<()> {
     let get_api = (*base).GetApi.ok_or_else(|| Error::Ort("OrtApiBase::GetApi missing".into()))?;
     let api = get_api(ort_ep_sys::ORT_API_VERSION);
     if api.is_null() {
-        let version = (*base)
-            .GetVersionString
-            .map(|f| CStr::from_ptr(f()).to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let version = (*base).GetVersionString.map(|f| CStr::from_ptr(f()).to_string_lossy().into_owned()).unwrap_or_default();
         return Err(Error::Ort(format!(
             "onnxruntime {version} does not provide API version {}; this provider needs onnxruntime >= 1.29",
             ort_ep_sys::ORT_API_VERSION
@@ -91,10 +88,7 @@ pub unsafe fn check(status: *mut OrtStatus, what: &str) -> Result<()> {
         return Ok(());
     }
     let api = api();
-    let msg = api
-        .GetErrorMessage
-        .map(|f| CStr::from_ptr(f(status)).to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let msg = api.GetErrorMessage.map(|f| CStr::from_ptr(f(status)).to_string_lossy().into_owned()).unwrap_or_default();
     let code = api.GetErrorCode.map(|f| f(status) as i32).unwrap_or(-1);
     if let Some(release) = api.ReleaseStatus {
         release(status);

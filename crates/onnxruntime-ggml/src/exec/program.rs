@@ -175,7 +175,9 @@ pub fn fuse_gelu(graph: &mut Graph) -> usize {
             let Some(&di) = erf.input(0).and_then(|n| producers.get(n)) else { continue };
             let div = &graph.nodes[di];
             let x = match div.op.as_str() {
-                "Div" if const_scalar(graph, &div.inputs[1]).is_some_and(|c| near(c, std::f64::consts::SQRT_2)) => div.inputs[0].clone(),
+                "Div" if const_scalar(graph, &div.inputs[1]).is_some_and(|c| near(c, std::f64::consts::SQRT_2)) => {
+                    div.inputs[0].clone()
+                }
                 "Mul" if const_scalar(graph, &div.inputs[1]).is_some_and(|c| near(c, std::f64::consts::FRAC_1_SQRT_2)) => {
                     div.inputs[0].clone()
                 }
@@ -188,7 +190,8 @@ pub fn fuse_gelu(graph: &mut Graph) -> usize {
             if consumers.get(erf_out.as_str()) != Some(&1) || consumers.get(div.outputs[0].as_str()) != Some(&1) {
                 continue;
             }
-            let Some((ai, add)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Add" && n.inputs.contains(erf_out)) else {
+            let Some((ai, add)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Add" && n.inputs.contains(erf_out))
+            else {
                 continue;
             };
             let other = if add.inputs[0] == *erf_out { &add.inputs[1] } else { &add.inputs[0] };
@@ -196,11 +199,13 @@ pub fn fuse_gelu(graph: &mut Graph) -> usize {
                 continue;
             }
             let add_out = add.outputs[0].clone();
-            let Some((mi, mul)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Mul" && n.inputs.contains(&add_out)) else {
+            let Some((mi, mul)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Mul" && n.inputs.contains(&add_out))
+            else {
                 continue;
             };
             let other = if mul.inputs[0] == add_out { mul.inputs[1].clone() } else { mul.inputs[0].clone() };
             let mut remove = vec![di, ei, ai, mi];
+            #[allow(clippy::needless_late_init)]
             let out_name;
             if other == x {
                 // (x * (1 + erf)) * 0.5
@@ -208,7 +213,8 @@ pub fn fuse_gelu(graph: &mut Graph) -> usize {
                     continue;
                 }
                 let mul_out = mul.outputs[0].clone();
-                let Some((hi, half)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Mul" && n.inputs.contains(&mul_out)) else {
+                let Some((hi, half)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Mul" && n.inputs.contains(&mul_out))
+                else {
                     continue;
                 };
                 let hother = if half.inputs[0] == mul_out { &half.inputs[1] } else { &half.inputs[0] };
@@ -224,7 +230,13 @@ pub fn fuse_gelu(graph: &mut Graph) -> usize {
                 if half.op != "Mul" {
                     continue;
                 }
-                let hx = if half.inputs[0] == x { &half.inputs[1] } else if half.inputs[1] == x { &half.inputs[0] } else { continue };
+                let hx = if half.inputs[0] == x {
+                    &half.inputs[1]
+                } else if half.inputs[1] == x {
+                    &half.inputs[0]
+                } else {
+                    continue;
+                };
                 if !const_scalar(graph, hx).is_some_and(|c| near(c, 0.5)) || consumers.get(other.as_str()) != Some(&1) {
                     continue;
                 }
@@ -325,11 +337,8 @@ pub fn prune_constants(graph: &mut Graph) {
 /// Float constants of rank <= 4 go to the primary backend once. Everything
 /// else stays host-only (ints are shape math; rank > 4 runs on the host).
 fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
-    let candidates: Vec<(&String, &HostTensor)> = graph
-        .constants
-        .iter()
-        .filter(|(_, t)| t.dtype().is_float() && t.rank() <= ggml::MAX_RANK && t.numel() > 0)
-        .collect();
+    let candidates: Vec<(&String, &HostTensor)> =
+        graph.constants.iter().filter(|(_, t)| t.dtype().is_float() && t.rank() <= ggml::MAX_RANK && t.numel() > 0).collect();
     unsafe {
         let ctx = g::ggml_init(g::ggml_init_params {
             mem_size: g::ggml_tensor_overhead() * (candidates.len() + 1),
@@ -403,7 +412,7 @@ mod tests {
     #[test]
     fn fuses_gelu() {
         let mut graph = Graph::default();
-        graph.constants.insert("sqrt2".into(), HostTensor::scalar_f32(1.4142135));
+        graph.constants.insert("sqrt2".into(), HostTensor::scalar_f32(std::f32::consts::SQRT_2));
         graph.constants.insert("one".into(), HostTensor::scalar_f32(1.0));
         graph.constants.insert("half".into(), HostTensor::scalar_f32(0.5));
         graph.nodes.push(Node::new("Div", "d", &["x", "sqrt2"], &["d_out"]));

@@ -293,6 +293,35 @@ def mask_from_offsets():
 
 
 @case
+def mask_from_constant_of_shape():
+    # Same causal mask, but the -inf side of the Where is a whole ConstantOfShape
+    # tensor rather than a scalar, and the condition has fewer heads than the
+    # scores. Multiplying that fill by a 0/1 mask would give -inf * 0 = NaN.
+    nodes = [
+        helper.make_node("Shape", ["x"], ["sh"]),
+        helper.make_node("ConstantOfShape", ["sh"], ["ninf"], value=helper.make_tensor("v", TensorProto.FLOAT, [1], [-np.inf])),
+        helper.make_node("Gather", ["sh", "three"], ["n"], axis=0),
+        helper.make_node("Range", ["zero", "n", "one"], ["pos"]),
+        helper.make_node("Unsqueeze", ["pos", "a1"], ["row"]),
+        helper.make_node("Unsqueeze", ["pos", "a0"], ["col"]),
+        helper.make_node("GreaterOrEqual", ["row", "col"], ["ge"]),
+        helper.make_node("Unsqueeze", ["ge", "a01"], ["m"]),
+        helper.make_node("Where", ["m", "x", "ninf"], ["w"]),
+        helper.make_node("Softmax", ["w"], ["y"], axis=-1),
+    ]
+    inits = [
+        const("three", np.int64(3)),
+        const("zero", np.int64(0)),
+        const("one", np.int64(1)),
+        const("a1", np.array([1], dtype=np.int64)),
+        const("a0", np.array([0], dtype=np.int64)),
+        const("a01", np.array([0, 1], dtype=np.int64)),
+    ]
+    shape = [1, 4, "seq", "seq"]
+    return model(nodes, [tin("x", shape)], [tin("y", shape)], inits), {"x": f32(1, 4, 6, 6)}, 1e-6, 1e-5
+
+
+@case
 def six_dim_kv_cache():
     # [past, L, 2, 1, H, D]: gather a layer, split k/v, concat a new step, write back 6-D
     nodes = [

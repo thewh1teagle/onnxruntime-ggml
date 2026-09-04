@@ -25,8 +25,8 @@ pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTenso
             let a = need(node, inputs, 0)?;
             HostTensor::bool(a.shape.clone(), a.as_bool().iter().map(|v| !v).collect())
         }
-        "Neg" | "Abs" | "Sqrt" | "Exp" | "Log" | "Sin" | "Cos" | "Tanh" | "Sigmoid" | "Elu" | "Relu" | "Erf"
-        | "Reciprocal" | "Floor" | "Ceil" | "GeluErf" => {
+        "Neg" | "Abs" | "Sqrt" | "Exp" | "Log" | "Sin" | "Cos" | "Tanh" | "Sigmoid" | "Elu" | "Relu" | "Erf" | "Reciprocal"
+        | "Floor" | "Ceil" | "GeluErf" => {
             let a = need(node, inputs, 0)?;
             unary(op, a, node.attr_f("alpha", 1.0))?
         }
@@ -141,10 +141,8 @@ pub fn compare(op: &str, a: &HostTensor, b: &HostTensor) -> Result<HostTensor> {
 pub fn erf(x: f32) -> f32 {
     let x = x as f64;
     let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let y = 1.0
-        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592)
-            * t
-            * (-x * x).exp();
+    let y =
+        1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
     (if x >= 0.0 { y } else { -y }) as f32
 }
 
@@ -189,11 +187,8 @@ pub fn reduce(op: &str, a: &HostTensor, axes: Option<&[i64]>, keepdims: bool, no
         _ => (0..rank).collect(),
     };
     let out_shape_kept: Vec<usize> = (0..rank).map(|d| if axes.contains(&d) { 1 } else { a.shape[d] }).collect();
-    let out_shape: Vec<usize> = if keepdims {
-        out_shape_kept.clone()
-    } else {
-        (0..rank).filter(|d| !axes.contains(d)).map(|d| a.shape[d]).collect()
-    };
+    let out_shape: Vec<usize> =
+        if keepdims { out_shape_kept.clone() } else { (0..rank).filter(|d| !axes.contains(d)).map(|d| a.shape[d]).collect() };
     let n_out = numel_of(&out_shape_kept);
     // map every input element to its output slot
     let strides = a.strides();
@@ -212,7 +207,7 @@ pub fn reduce(op: &str, a: &HostTensor, axes: Option<&[i64]>, keepdims: bool, no
         }
         slot.push(o);
     }
-    let count = if n_out == 0 { 0 } else { n_in / n_out };
+    let count = n_in.checked_div(n_out).unwrap_or(0);
     let is_int = !a.dtype().is_float();
     if is_int && matches!(op, "ReduceProd" | "ReduceSum" | "ReduceMax" | "ReduceMin") {
         let x = a.as_i64();

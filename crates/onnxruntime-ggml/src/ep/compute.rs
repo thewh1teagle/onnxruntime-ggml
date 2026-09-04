@@ -44,14 +44,22 @@ impl ComputeInfo {
     }
 }
 
-unsafe extern "C" fn create_state(this: *mut OrtNodeComputeInfo, _ctx: *mut OrtNodeComputeContext, state: *mut *mut c_void) -> *mut OrtStatus {
+unsafe extern "C" fn create_state(
+    this: *mut OrtNodeComputeInfo,
+    _ctx: *mut OrtNodeComputeContext,
+    state: *mut *mut c_void,
+) -> *mut OrtStatus {
     let info = ComputeInfo::from_ptr(this);
     tracing::debug!(node = %info.name, "compute state created");
     *state = this as *mut c_void;
     std::ptr::null_mut()
 }
 
-unsafe extern "C" fn compute(this: *mut OrtNodeComputeInfo, _state: *mut c_void, kernel_ctx: *mut OrtKernelContext) -> *mut OrtStatus {
+unsafe extern "C" fn compute(
+    this: *mut OrtNodeComputeInfo,
+    _state: *mut c_void,
+    kernel_ctx: *mut OrtKernelContext,
+) -> *mut OrtStatus {
     guard("Compute", || {
         let info = ComputeInfo::from_ptr(this);
         let run_no = info.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

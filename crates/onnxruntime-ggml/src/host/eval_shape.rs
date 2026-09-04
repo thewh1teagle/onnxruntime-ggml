@@ -16,10 +16,9 @@ pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTenso
             let dims: Vec<i64> = x.shape[start..end.max(start)].iter().map(|&d| d as i64).collect();
             HostTensor::i64(vec![dims.len()], dims)
         }
-        "Constant" => node
-            .attr_tensor("value")
-            .cloned()
-            .ok_or_else(|| Error::model(format!("{node}: Constant without a tensor value")))?,
+        "Constant" => {
+            node.attr_tensor("value").cloned().ok_or_else(|| Error::model(format!("{node}: Constant without a tensor value")))?
+        }
         "Identity" => need(node, inputs, 0)?.clone(),
         "Reshape" => {
             let x = need(node, inputs, 0)?;
@@ -38,9 +37,7 @@ pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTenso
         }
         "Transpose" => {
             let x = need(node, inputs, 0)?;
-            let perm = node
-                .attr_ints("perm")
-                .unwrap_or_else(|| (0..x.rank() as i64).rev().collect());
+            let perm = node.attr_ints("perm").unwrap_or_else(|| (0..x.rank() as i64).rev().collect());
             transpose(x, &perm)?
         }
         "Concat" => {
@@ -165,7 +162,7 @@ pub fn resolve_reshape(input: &[usize], shape: &[i64], allowzero: bool) -> Resul
     }
     if let Some(i) = infer {
         let known: usize = out.iter().product();
-        if known == 0 || total % known != 0 {
+        if known == 0 || !total.is_multiple_of(known) {
             return Err(Error::shape(format!("cannot infer -1 reshaping {input:?} to {shape:?}")));
         }
         out[i] = total / known;
@@ -257,11 +254,18 @@ pub fn concat(xs: &[&HostTensor], axis: usize) -> Result<HostTensor> {
     let mut out = HostTensor::zeros(dtype, out_shape.clone());
     let mut pos = 0usize;
     let _ = n;
+    // Cast once per input, not once per slab: `cast` copies the whole tensor
+    // (even when the dtype already matches), and the slab loop runs `outer`
+    // times, so casting inside it turned a memcpy into an O(outer) full copy.
+    let src: Vec<std::borrow::Cow<HostTensor>> = xs
+        .iter()
+        .map(|t| if t.dtype() == dtype { std::borrow::Cow::Borrowed(*t) } else { std::borrow::Cow::Owned(t.cast(dtype)) })
+        .collect();
     for o in 0..outer {
-        for t in xs {
+        for t in &src {
             let slab = t.shape[axis] * inner;
             let src_start = o * slab;
-            copy_slab(&mut out, pos, &t.cast(dtype), src_start, slab);
+            copy_slab(&mut out, pos, t, src_start, slab);
             pos += slab;
         }
     }
@@ -317,11 +321,8 @@ pub fn slice_plan(
             let e = if e < 0 { e + dim } else { e }.clamp(-1, dim - 1);
             (s, e)
         };
-        let count = if step > 0 {
-            ((end - start).max(0) + step - 1) / step
-        } else {
-            ((start - end).max(0) + (-step) - 1) / (-step)
-        };
+        let count =
+            if step > 0 { ((end - start).max(0) + step - 1) / step } else { ((start - end).max(0) + (-step) - 1) / (-step) };
         plan.start[axis] = start.max(0) as usize;
         plan.count[axis] = count.max(0) as usize;
         plan.step[axis] = step;
@@ -423,7 +424,13 @@ pub fn where_(c: &HostTensor, x: &HostTensor, y: &HostTensor) -> Result<HostTens
     let yi = broadcast_index(&y.shape, &shape);
     let cond = c.as_bool();
     let n = numel_of(&shape);
-    let dtype = if x.dtype() == y.dtype() { x.dtype() } else if x.dtype().is_float() || y.dtype().is_float() { DType::F32 } else { DType::I64 };
+    let dtype = if x.dtype() == y.dtype() {
+        x.dtype()
+    } else if x.dtype().is_float() || y.dtype().is_float() {
+        DType::F32
+    } else {
+        DType::I64
+    };
     let x = x.cast(dtype);
     let y = y.cast(dtype);
     let data = match (&x.data, &y.data) {

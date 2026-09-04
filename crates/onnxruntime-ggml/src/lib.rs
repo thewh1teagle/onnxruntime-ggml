@@ -15,6 +15,8 @@
 //! Every stage traces with `tracing`; set `ORT_GGML_LOG=debug` (or `trace`)
 //! to follow a session from capability query to the last readback.
 
+#![allow(clippy::missing_safety_doc, clippy::doc_overindented_list_items)]
+
 pub mod ep;
 pub mod error;
 pub mod exec;

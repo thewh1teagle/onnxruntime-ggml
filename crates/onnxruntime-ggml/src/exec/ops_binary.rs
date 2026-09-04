@@ -135,11 +135,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
 pub fn broadcast_pair(run: &mut Run, a: DeviceTensor, b: DeviceTensor, out: &[usize]) -> Result<(DeviceTensor, DeviceTensor)> {
     unsafe {
         let a = if a.shape() == out { a } else { ggml::repeat_to(run.ctx, contig(run.ctx, a), out)? };
-        let b = if broadcasts_into(&b.shape(), out) {
-            b
-        } else {
-            ggml::repeat_to(run.ctx, contig(run.ctx, b), out)?
-        };
+        let b = if broadcasts_into(&b.shape(), out) { b } else { ggml::repeat_to(run.ctx, contig(run.ctx, b), out)? };
         Ok((contig(run.ctx, a), contig(run.ctx, b)))
     }
 }
@@ -147,7 +143,8 @@ pub fn broadcast_pair(run: &mut Run, a: DeviceTensor, b: DeviceTensor, out: &[us
 pub fn binary(run: &mut Run, op: &str, a: DeviceTensor, b: DeviceTensor, out: &[usize]) -> Result<DeviceTensor> {
     let ctx = run.ctx;
     // commutative ops can put the larger operand first without a repeat
-    let (a, b, swapped) = if a.shape() != out && b.shape() == out && matches!(op, "Add" | "Mul") { (b, a, true) } else { (a, b, false) };
+    let (a, b, swapped) =
+        if a.shape() != out && b.shape() == out && matches!(op, "Add" | "Mul") { (b, a, true) } else { (a, b, false) };
     let _ = swapped;
     let (a, b) = broadcast_pair(run, a, b, out)?;
     let t = unsafe {
@@ -216,7 +213,11 @@ fn layer_norm(
     unsafe {
         let flat = if axis + 1 == x.rank { contig(ctx, x) } else { ggml::reshape(ctx, x, &[outer, inner])? };
         let normed = DeviceTensor { t: g::ggml_norm(ctx, flat.t, eps), ..flat };
-        let s = if scale.numel() == inner { ggml::reshape(ctx, scale, &[inner])? } else { return Err(Error::shape("layernorm scale size")) };
+        let s = if scale.numel() == inner {
+            ggml::reshape(ctx, scale, &[inner])?
+        } else {
+            return Err(Error::shape("layernorm scale size"));
+        };
         let mut y = DeviceTensor { t: g::ggml_mul(ctx, normed.t, s.t), ..normed };
         if let Some(b) = bias {
             let b = ggml::reshape(ctx, b, &[inner])?;
@@ -259,24 +260,38 @@ fn reduce_last(run: &mut Run, op: &str, x: DeviceTensor, axis: usize, keepdims: 
     }
 }
 
-fn is_huge(t: &HostTensor) -> bool {
-    t.numel() == 1 && t.scalar_f64().map(|v| !v.is_finite() || v.abs() >= 1e30).unwrap_or(false)
+/// The single huge/non-finite value a host tensor is filled with, if it is one.
+///
+/// Attention mask fills arrive both as an `-inf` scalar and, from
+/// `ConstantOfShape`, as a whole tensor of `-inf` (pocket-tts does the latter: a
+/// `[1, 16, S, S]` block per attention layer). Either way `where_` must not
+/// multiply it by a 0/1 mask, because `-inf * 0` is NaN; the additive-bias path
+/// below keeps it exact. Uniformity is what matters here, not the element count.
+fn huge_fill(t: &HostTensor) -> Option<f32> {
+    if !matches!(t.dtype(), DType::F32 | DType::F16 | DType::F64) {
+        return None;
+    }
+    let v = t.as_f32();
+    let first = *v.first()?;
+    if first.is_nan() || (first.is_finite() && first.abs() < 1e30) {
+        return None;
+    }
+    v.iter().all(|&x| x == first).then_some(first)
 }
 
 fn where_(run: &mut Run, c: &In, x: &In, y: &In) -> Result<DeviceTensor> {
     let cond = run.host_param(c, "where condition")?.clone();
     let out = broadcast_all(&[&cond.shape, &x.v.shape(), &y.v.shape()])?;
     let cb = cond.as_bool();
-    // c ? x : y  with y a huge/inf scalar: x + (c ? 0 : y), which keeps -inf exact for masks
-    if let Some(yt) = y.v.host().filter(|t| is_huge(t)) {
-        let yv = yt.scalar_f64()? as f32;
+    // c ? x : y  with y filled with a huge/inf value: x + (c ? 0 : y). This keeps
+    // -inf exact for masks and uploads only the (much smaller) cond-shaped bias.
+    if let Some(yv) = y.v.host().and_then(huge_fill) {
         let bias = HostTensor::f32(cond.shape.clone(), cb.iter().map(|&b| if b { 0.0 } else { yv }).collect());
         let bd = run.upload(&bias, "where_bias")?;
         let xd = run.dev_f32(x)?;
         return binary(run, "Add", xd, bd, &out);
     }
-    if let Some(xt) = x.v.host().filter(|t| is_huge(t)) {
-        let xv = xt.scalar_f64()? as f32;
+    if let Some(xv) = x.v.host().and_then(huge_fill) {
         let bias = HostTensor::f32(cond.shape.clone(), cb.iter().map(|&b| if b { xv } else { 0.0 }).collect());
         let bd = run.upload(&bias, "where_bias")?;
         let yd = run.dev_f32(y)?;

@@ -157,6 +157,7 @@ task wheel-for version platform archive out {
     else if $2 == linux-aarch64 { tag=manylinux_2_28_aarch64 }
     else if $2 == windows-amd64 { tag=win_amd64 }
     else { fail "unknown platform $2" }
+    mkdir $4
     remove $lib_dir
     mkdir $lib_dir
     extract $3 $lib_dir --flatten

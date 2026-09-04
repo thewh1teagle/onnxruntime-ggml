@@ -79,14 +79,12 @@ pub fn supported(op: &str) -> bool {
 pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTensor>> {
     let op = node.op.as_str();
     let outs = match op {
-        "Shape" | "Reshape" | "Unsqueeze" | "Squeeze" | "Transpose" | "Concat" | "Slice" | "Gather" | "Split"
-        | "Range" | "ConstantOfShape" | "Expand" | "Cast" | "Where" | "Constant" | "Identity" => {
-            eval_shape::eval(node, inputs)?
-        }
-        "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Neg" | "Abs" | "Sqrt" | "Exp" | "Log" | "Sin" | "Cos" | "Tanh"
-        | "Sigmoid" | "Elu" | "Relu" | "Erf" | "Reciprocal" | "Floor" | "Ceil" | "Greater" | "GreaterOrEqual"
-        | "Less" | "LessOrEqual" | "Equal" | "And" | "Or" | "Not" | "ReduceMean" | "ReduceSum" | "ReduceProd"
-        | "ReduceMax" | "ReduceMin" | "Softmax" | "GeluErf" | "Clip" | "Max" | "Min" => eval_math::eval(node, inputs)?,
+        "Shape" | "Reshape" | "Unsqueeze" | "Squeeze" | "Transpose" | "Concat" | "Slice" | "Gather" | "Split" | "Range"
+        | "ConstantOfShape" | "Expand" | "Cast" | "Where" | "Constant" | "Identity" => eval_shape::eval(node, inputs)?,
+        "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Neg" | "Abs" | "Sqrt" | "Exp" | "Log" | "Sin" | "Cos" | "Tanh" | "Sigmoid"
+        | "Elu" | "Relu" | "Erf" | "Reciprocal" | "Floor" | "Ceil" | "Greater" | "GreaterOrEqual" | "Less" | "LessOrEqual"
+        | "Equal" | "And" | "Or" | "Not" | "ReduceMean" | "ReduceSum" | "ReduceProd" | "ReduceMax" | "ReduceMin" | "Softmax"
+        | "GeluErf" | "Clip" | "Max" | "Min" => eval_math::eval(node, inputs)?,
         "MatMul" | "Gemm" | "LayerNormalization" | "Conv" | "ConvTranspose" => eval_nn::eval(node, inputs)?,
         other => return Err(Error::unsupported(format!("host op {other}"))),
     };
@@ -96,11 +94,7 @@ pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTenso
 
 /// The input at `i`, or an error naming the node.
 pub fn need<'a>(node: &Node, inputs: &[Option<&'a HostTensor>], i: usize) -> Result<&'a HostTensor> {
-    inputs
-        .get(i)
-        .copied()
-        .flatten()
-        .ok_or_else(|| Error::model(format!("{node}: missing input {i}")))
+    inputs.get(i).copied().flatten().ok_or_else(|| Error::model(format!("{node}: missing input {i}")))
 }
 
 /// Normalise a possibly negative axis against `rank`.

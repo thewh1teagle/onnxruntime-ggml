@@ -226,7 +226,11 @@ unsafe extern "C" fn num_custom_op_domains(_this: *mut OrtEpFactory, n: *mut usi
     std::ptr::null_mut()
 }
 
-unsafe extern "C" fn custom_op_domains(_this: *mut OrtEpFactory, _domains: *mut *mut OrtCustomOpDomain, _n: usize) -> *mut OrtStatus {
+unsafe extern "C" fn custom_op_domains(
+    _this: *mut OrtEpFactory,
+    _domains: *mut *mut OrtCustomOpDomain,
+    _n: usize,
+) -> *mut OrtStatus {
     std::ptr::null_mut()
 }
 

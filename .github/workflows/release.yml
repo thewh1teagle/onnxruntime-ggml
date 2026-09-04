@@ -58,6 +58,11 @@ jobs:
   wheels:
     needs: libs
     runs-on: ubuntu-22.04
+    # A step cannot read `secrets` from its own `if`, and a step-level `env` is not
+    # in scope for that step's `if` either. Deciding once here, at job level, is the
+    # way to make publishing conditional on the secret being set.
+    env:
+      HAS_PYPI: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: getchore/setup-chore@v1
@@ -73,12 +78,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: chore wheels ${{ steps.v.outputs.version }}
       - name: Upload wheels to the release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: for w in dist/wheels/*.whl; do gh release upload v${{ steps.v.outputs.version }} "$w" --clobber; done
       - name: Publish to PyPI
-        if: ${{ env.PYPI_API_TOKEN != '' }}
+        if: env.HAS_PYPI == 'true'
         env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: uv publish dist/wheels/*.whl

@@ -44,11 +44,7 @@ impl Provider {
     pub unsafe fn create(name: &str, session_options: *const OrtSessionOptions, logger: *const OrtLogger) -> Result<*mut OrtEp> {
         let opts = options::from_session(name, session_options);
         let backend = Arc::new(Backend::new(opts.clone())?);
-        log(
-            logger,
-            ORT_LOGGING_LEVEL_INFO,
-            &format!("onnxruntime-ggml {EP_VERSION}: primary backend {}", backend.primary_name),
-        );
+        log(logger, ORT_LOGGING_LEVEL_INFO, &format!("onnxruntime-ggml {EP_VERSION}: primary backend {}", backend.primary_name));
         let mut base: OrtEp = std::mem::zeroed();
         base.ort_version_supported = ORT_API_VERSION;
         base.GetName = Some(get_name);
@@ -116,7 +112,11 @@ unsafe fn list_nodes(graph: *const OrtGraph) -> Result<Vec<NodeInfo>> {
     Ok(out)
 }
 
-unsafe extern "C" fn get_capability(this: *mut OrtEp, graph: *const OrtGraph, info: *mut OrtEpGraphSupportInfo) -> *mut OrtStatus {
+unsafe extern "C" fn get_capability(
+    this: *mut OrtEp,
+    graph: *const OrtGraph,
+    info: *mut OrtEpGraphSupportInfo,
+) -> *mut OrtStatus {
     guard("GetCapability", || {
         let provider = Provider::from_ptr(this);
         let span = tracing::info_span!("capability");
@@ -139,11 +139,11 @@ unsafe extern "C" fn get_capability(this: *mut OrtEp, graph: *const OrtGraph, in
             }
         }
         let mut hist: Vec<(String, usize)> = hist.into_iter().collect();
-        hist.sort_by(|a, b| b.1.cmp(&a.1));
+        hist.sort_by_key(|e| std::cmp::Reverse(e.1));
         tracing::debug!(ops = ?hist, "op histogram");
         if !unsupported.is_empty() {
             let mut list: Vec<(String, usize)> = unsupported.into_iter().collect();
-            list.sort_by(|a, b| b.1.cmp(&a.1));
+            list.sort_by_key(|e| std::cmp::Reverse(e.1));
             let msg = format!(
                 "{} of {} nodes use ops this provider lacks: {}",
                 nodes.len() - supported.len(),
@@ -155,7 +155,11 @@ unsafe extern "C" fn get_capability(this: *mut OrtEp, graph: *const OrtGraph, in
                 log(provider.logger, ORT_LOGGING_LEVEL_WARNING, &format!("onnxruntime-ggml: {msg}; partial claim"));
             } else {
                 tracing::warn!(%msg, "claiming nothing; the CPU provider runs this graph");
-                log(provider.logger, ORT_LOGGING_LEVEL_WARNING, &format!("onnxruntime-ggml: {msg}; claiming nothing (set partial=1 to override)"));
+                log(
+                    provider.logger,
+                    ORT_LOGGING_LEVEL_WARNING,
+                    &format!("onnxruntime-ggml: {msg}; claiming nothing (set partial=1 to override)"),
+                );
                 return Ok(());
             }
         }
@@ -165,7 +169,11 @@ unsafe extern "C" fn get_capability(this: *mut OrtEp, graph: *const OrtGraph, in
         let mut fusion = OrtNodeFusionOptions { ort_version_supported: ORT_API_VERSION, drop_constant_initializers: true };
         ep_call!(EpGraphSupportInfo_AddNodesToFuse(info, supported.as_ptr(), supported.len(), &mut fusion))?;
         tracing::info!(claimed = supported.len(), total = nodes.len(), "nodes claimed for fusion");
-        log(provider.logger, ORT_LOGGING_LEVEL_INFO, &format!("onnxruntime-ggml: claimed {} of {} nodes", supported.len(), nodes.len()));
+        log(
+            provider.logger,
+            ORT_LOGGING_LEVEL_INFO,
+            &format!("onnxruntime-ggml: claimed {} of {} nodes", supported.len(), nodes.len()),
+        );
         Ok(())
     })
 }
@@ -210,12 +218,20 @@ unsafe extern "C" fn compat_info(this: *mut OrtEp, _graph: *const OrtGraph) -> *
     Provider::from_ptr(this).compat.as_ptr()
 }
 
-unsafe extern "C" fn create_allocator(_this: *mut OrtEp, _mi: *const OrtMemoryInfo, allocator: *mut *mut OrtAllocator) -> *mut OrtStatus {
+unsafe extern "C" fn create_allocator(
+    _this: *mut OrtEp,
+    _mi: *const OrtMemoryInfo,
+    allocator: *mut *mut OrtAllocator,
+) -> *mut OrtStatus {
     *allocator = std::ptr::null_mut();
     std::ptr::null_mut()
 }
 
-unsafe extern "C" fn create_sync_stream(_this: *mut OrtEp, _dev: *const OrtMemoryDevice, stream: *mut *mut OrtSyncStreamImpl) -> *mut OrtStatus {
+unsafe extern "C" fn create_sync_stream(
+    _this: *mut OrtEp,
+    _dev: *const OrtMemoryDevice,
+    stream: *mut *mut OrtSyncStreamImpl,
+) -> *mut OrtStatus {
     *stream = std::ptr::null_mut();
     std::ptr::null_mut()
 }

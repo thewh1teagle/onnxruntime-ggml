@@ -20,7 +20,26 @@ chore wheels 0.1.0                  # wheels for every platform whose archive is
 chore publish 0.1.0                 # upload wheels to the release and to PyPI
 ```
 
-`chore wheels` skips platforms whose archive is missing, so a partial matrix still yields wheels for what was built.
+`chore wheels` skips platforms whose archive is missing, so a partial matrix still yields wheels for what was built. It looks in `dist/` first and only then tries the release, so an archive left there by `chore package-lib <version>` is enough to build that platform's wheel with no release at all.
+
+To build a single wheel from one archive:
+
+```console
+chore wheel-for 0.1.0 darwin-arm64 dist/onnxruntime-ggml-0.1.0-darwin-arm64.tar.gz dist/wheels
+```
+
+The library is staged into `python/onnxruntime_ggml/lib/` for the build and removed again afterwards, leaving the `.gitkeep`. That directory is in `.gitignore`; hatchling still packs it because `artifacts` in `python/pyproject.toml` force-includes VCS-ignored paths. Hatchling builds `py3-none-any`, and `uvx --from wheel wheel tags` retags it for the platform.
+
+## Verifying a wheel
+
+```console
+uv venv /tmp/ggml-wheel-test
+uv pip install --python /tmp/ggml-wheel-test/bin/python dist/wheels/*.whl
+/tmp/ggml-wheel-test/bin/python -m onnxruntime_ggml
+uv run tests/test_wheel.py /tmp/ggml-wheel-test/bin/python
+```
+
+`python -m onnxruntime_ggml` prints the library path and one `device ggml ...` line; the path must be inside the venv's `site-packages`, not `target/release`. `tests/test_wheel.py` builds a two-node graph (Add then Mul) with `onnx.helper` and runs it in that interpreter twice, through `onnxruntime_ggml.InferenceSession` and on the CPU provider, then compares the outputs. It clears `ONNXRUNTIME_GGML_LIBRARY` for the child, so it always exercises the library bundled in the wheel rather than a development build.
 
 ## Wheel tags
 
