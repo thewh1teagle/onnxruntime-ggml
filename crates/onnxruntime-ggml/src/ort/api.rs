@@ -151,7 +151,14 @@ pub unsafe fn log(logger: *const OrtLogger, level: OrtLoggingLevel, msg: &str) {
     }
     let Some(f) = api().Logger_LogMessage else { return };
     let c = CString::new(msg.replace('\0', " ")).unwrap_or_default();
-    let st = f(logger, level, c.as_ptr(), c"onnxruntime-ggml".as_ptr(), 0, c"ep".as_ptr());
+    // ORTCHAR_T is wchar_t on Windows and char elsewhere.
+    #[cfg(windows)]
+    let file: Vec<u16> = "onnxruntime-ggml\0".encode_utf16().collect();
+    #[cfg(windows)]
+    let file_ptr = file.as_ptr();
+    #[cfg(not(windows))]
+    let file_ptr = c"onnxruntime-ggml".as_ptr();
+    let st = f(logger, level, c.as_ptr(), file_ptr, 0, c"ep".as_ptr());
     if !st.is_null() {
         if let Some(release) = api().ReleaseStatus {
             release(st);

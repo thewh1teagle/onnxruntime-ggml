@@ -24,7 +24,8 @@ pub enum DType {
 impl DType {
     pub fn from_onnx(code: i32) -> Result<DType> {
         use ort_ep_sys::*;
-        Ok(match code as u32 {
+        // bindgen makes C enums i32 on MSVC and u32 elsewhere; compare in the enum's own type.
+        Ok(match code as ONNXTensorElementDataType {
             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT => DType::F32,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 => DType::F16,
             ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE => DType::F64,
