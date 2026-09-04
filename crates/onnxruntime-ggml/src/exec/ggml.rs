@@ -70,6 +70,17 @@ pub unsafe fn new_tensor(ctx: Ctx, dtype: DType, shape: &[usize]) -> Result<Devi
     Ok(dev(t, shape))
 }
 
+/// A tensor of an explicit ggml type (quantised weights).
+pub unsafe fn new_tensor_typed(ctx: Ctx, ty: g::ggml_type, shape: &[usize]) -> Result<DeviceTensor> {
+    let ne = ne_of(shape)?;
+    let n_dims = shape.len().clamp(1, 4) as i32;
+    let t = g::ggml_new_tensor(ctx, ty, n_dims, ne.as_ptr());
+    if t.is_null() {
+        return Err(Error::ggml("ggml_new_tensor returned null"));
+    }
+    Ok(dev(t, shape))
+}
+
 pub unsafe fn set_name(t: T, name: &str) {
     let trimmed: String = name.chars().take(60).collect();
     if let Ok(c) = CString::new(trimmed) {

@@ -91,6 +91,7 @@ pub const DEVICE_OPS: &[&str] = &[
     "Gemm",
     "Conv",
     "ConvTranspose",
+    "FusedAttention",
 ];
 
 /// Ops whose ggml emitter carries a logical ONNX shape of any rank (see
@@ -229,6 +230,20 @@ impl<'p> Run<'p> {
         self.stats.uploads += 1;
         self.stats.upload_bytes += bytes.len();
         tracing::trace!(name, shape = ?t.shape, dtype = %dtype, bytes = bytes.len(), "upload");
+        self.uploads.push(Upload { t: d.t, src: UploadSrc::Owned(bytes) });
+        Ok(d)
+    }
+
+    /// A leaf of an explicit element type with ready-made bytes (f16 masks).
+    pub fn upload_raw(&mut self, dtype: DType, shape: &[usize], bytes: Vec<u8>, name: &str) -> Result<DeviceTensor> {
+        let d = unsafe { ggml::new_tensor(self.ctx, dtype, shape)? };
+        unsafe {
+            ggml::set_name(d.t, &format!("in:{name}"));
+            g::ggml_set_input(d.t);
+        }
+        self.stats.uploads += 1;
+        self.stats.upload_bytes += bytes.len();
+        tracing::trace!(name, ?shape, dtype = %dtype, bytes = bytes.len(), "upload (raw)");
         self.uploads.push(Upload { t: d.t, src: UploadSrc::Owned(bytes) });
         Ok(d)
     }
@@ -387,6 +402,17 @@ impl<'p> Run<'p> {
             }
             let n_nodes = g::ggml_graph_n_nodes(self.graph) as usize;
             self.stats.ggml_nodes += n_nodes;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let mut hist: HashMap<String, usize> = HashMap::new();
+                for i in 0..n_nodes as i32 {
+                    let node = g::ggml_graph_node(self.graph, i);
+                    let op = std::ffi::CStr::from_ptr(g::ggml_op_desc(node)).to_string_lossy().into_owned();
+                    *hist.entry(op).or_default() += 1;
+                }
+                let mut list: Vec<(String, usize)> = hist.into_iter().collect();
+                list.sort_by_key(|e| std::cmp::Reverse(e.1));
+                tracing::debug!(ops = ?list, "ggml graph ops");
+            }
             g::ggml_backend_sched_reset(sched);
             if !g::ggml_backend_sched_alloc_graph(sched, self.graph) {
                 return Err(Error::ggml(format!("scheduler could not allocate a graph of {n_nodes} nodes ({reason})")));
@@ -409,6 +435,11 @@ impl<'p> Run<'p> {
                 return Err(Error::ggml(format!("graph compute failed with status {status} ({reason})")));
             }
             let t_compute = started.elapsed() - t_alloc;
+            tracing::debug!(
+                splits = g::ggml_backend_sched_get_n_splits(sched),
+                copies = g::ggml_backend_sched_get_n_copies(sched),
+                "scheduler"
+            );
             let t_read0 = Instant::now();
             let mut read_bytes = 0usize;
             for (name, d) in &outs {
@@ -653,6 +684,7 @@ impl<'p> Run<'p> {
             "Reshape" | "Unsqueeze" | "Squeeze" | "Transpose" | "Slice" | "Concat" | "Gather" | "Split" | "Expand"
             | "Identity" => ops_shape::emit(self, node, ins),
             "MatMul" | "Gemm" | "Conv" | "ConvTranspose" => ops_nn::emit(self, node, ins),
+            "FusedAttention" => crate::exec::attention::emit(self, node, ins),
             _ => ops_binary::emit(self, node, ins),
         }
     }
@@ -665,6 +697,7 @@ pub fn param_indices(node: &Node) -> Vec<usize> {
         "Slice" => vec![1, 2, 3, 4],
         "Gather" => vec![1],
         "Where" => vec![0],
+        "FusedAttention" => vec![3],
         "Clip" => vec![1, 2],
         "ReduceMean" | "ReduceSum" => vec![1],
         _ => vec![],

@@ -22,6 +22,9 @@ pub enum WeightPrecision {
     /// Half the memory traffic, and the type Metal's matmul kernels want. Only
     /// the 2-D matmul weights are converted; biases and norms stay f32.
     F16,
+    /// 8-bit blocks of 32 with one f16 scale each: half of F16 again, near-lossless
+    /// for matvec-bound decoding. Rows whose length is not a multiple of 32 stay F16.
+    Q8_0,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,8 +35,23 @@ pub enum Device {
     Cpu,
 }
 
+/// How attention subgraphs are executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attention {
+    /// Flash attention for long queries (encoders, prefill), the matmul path
+    /// for short ones (decode steps), decided per run from T.
+    Auto,
+    /// MatMul, soft_max_ext(scale, mask), MatMul: three kernels, exact f32.
+    Matmul,
+    /// `ggml_flash_attn_ext` with K/V cast to f16.
+    Flash,
+    /// `ggml_flash_attn_ext` with K/V left in f32.
+    FlashF32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Options {
+    pub attention: Attention,
     pub device: Device,
     pub threads: i32,
     /// Claim a subgraph even when some ops are unsupported (onnxruntime then
@@ -55,6 +73,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
+            attention: Attention::Auto,
             device: Device::Auto,
             threads: default_threads(),
             partial: false,
@@ -80,6 +99,7 @@ impl Options {
         o.apply("threads", std::env::var("ORT_GGML_THREADS").ok().as_deref());
         o.apply("partial", std::env::var("ORT_GGML_PARTIAL").ok().as_deref());
         o.apply("dump", std::env::var("ORT_GGML_DUMP").ok().as_deref());
+        o.apply("attention", std::env::var("ORT_GGML_ATTENTION").ok().as_deref());
         o.apply("accel", std::env::var("ORT_GGML_ACCEL").ok().as_deref());
         o.apply("weights", std::env::var("ORT_GGML_WEIGHTS").ok().as_deref());
         o.apply("sticky", std::env::var("ORT_GGML_STICKY").ok().as_deref());
@@ -108,12 +128,25 @@ impl Options {
             },
             "partial" => self.partial = matches!(v.as_str(), "1" | "true" | "yes"),
             "dump" => self.dump = matches!(v.as_str(), "1" | "true" | "yes"),
+            "attention" => {
+                self.attention = match v.as_str() {
+                    "auto" | "" => Attention::Auto,
+                    "matmul" | "off" | "0" => Attention::Matmul,
+                    "flash" | "flash-f16" | "1" => Attention::Flash,
+                    "flash-f32" | "flash32" => Attention::FlashF32,
+                    other => {
+                        tracing::warn!(value = other, "unknown attention option, using auto");
+                        Attention::Auto
+                    }
+                }
+            }
             "accel" => self.accel = matches!(v.as_str(), "1" | "true" | "yes"),
             "sticky" => self.sticky = matches!(v.as_str(), "1" | "true" | "yes"),
             "weights" => {
                 self.weights = match v.as_str() {
                     "f16" | "fp16" | "half" | "" => WeightPrecision::F16,
                     "f32" | "fp32" | "float" => WeightPrecision::F32,
+                    "q8_0" | "q8" | "int8" => WeightPrecision::Q8_0,
                     other => {
                         tracing::warn!(value = other, "unknown weights option, using f16");
                         WeightPrecision::F16

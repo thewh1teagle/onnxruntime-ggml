@@ -16,8 +16,9 @@ onnxruntime stores them as session config entries `ep.ggml.<key>`, which is also
 | `threads` | int | half the cores, max 8 | ggml CPU backend threads |
 | `partial` | `0`, `1` | `0` | claim supported nodes even when some ops are unsupported (copies at every boundary) |
 | `dump` | `0`, `1` | `0` | log every intermediate value at trace level |
+| `attention` | `auto`, `matmul`, `flash`, `flash-f32` | `auto` | exported attention is fused into one node; `auto` runs flash attention (f32 K/V) when the query has 32+ positions and a three-kernel matmul path otherwise |
 | `accel` | `0`, `1` | `0` | add ggml's ACCEL backends (BLAS on macOS) to the scheduler |
-| `weights` | `f32`, `f16` | `f16` | storage type of the resident 2-D matmul weights |
+| `weights` | `f32`, `f16`, `q8_0` | `f16` | storage type of the resident 2-D matmul weights; `q8_0` halves the bytes again for decode-bound models |
 | `sticky` | `0`, `1` | `1` | keep large unchanged float graph inputs resident on the device between runs |
 
 ### `weights`

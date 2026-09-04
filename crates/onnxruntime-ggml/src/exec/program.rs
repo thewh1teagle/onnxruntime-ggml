@@ -14,7 +14,7 @@ use std::time::Instant;
 use ggml_sys as g;
 
 use crate::error::{Error, Result};
-use crate::exec::backend::{Backend, WeightPrecision};
+use crate::exec::backend::{Attention, Backend, WeightPrecision};
 use crate::exec::fusion;
 use crate::exec::ggml::{self, Ctx};
 use crate::exec::input::InputRef;
@@ -60,6 +60,7 @@ pub struct CompileStats {
     pub folded: usize,
     pub gelu_fused: usize,
     pub layer_norms_fused: usize,
+    pub attention_fused: usize,
     pub weights_transposed: usize,
     pub constants: usize,
     pub weights_uploaded: usize,
@@ -99,6 +100,8 @@ impl Program {
         stats.folded = fold_constants(&mut graph)?;
         stats.gelu_fused = fusion::fuse_gelu(&mut graph);
         stats.layer_norms_fused = fusion::fuse_layer_norm(&mut graph);
+        let _ = Attention::Auto;
+        stats.attention_fused = fusion::fuse_attention(&mut graph);
         stats.weights_transposed = pretranspose_weights(&mut graph)?;
         prune_constants(&mut graph);
         stats.constants = graph.constants.len();
@@ -117,6 +120,7 @@ impl Program {
             folded = stats.folded,
             gelu_fused = stats.gelu_fused,
             layer_norms_fused = stats.layer_norms_fused,
+            attention_fused = stats.attention_fused,
             weights_transposed = stats.weights_transposed,
             weights = stats.weights_uploaded,
             weight_bytes = %bytes(stats.weight_bytes),
@@ -288,9 +292,12 @@ fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
     let candidates: Vec<(&String, &Arc<HostTensor>)> =
         graph.constants.iter().filter(|(_, t)| t.dtype().is_float() && t.rank() <= ggml::MAX_RANK && t.numel() > 0).collect();
     let half = match backend.options.weights {
-        WeightPrecision::F16 => mul_mat_weights(graph),
+        WeightPrecision::F16 | WeightPrecision::Q8_0 => mul_mat_weights(graph),
         WeightPrecision::F32 => HashSet::new(),
     };
+    let quant = backend.options.weights == WeightPrecision::Q8_0;
+    // q8_0 blocks are 32 wide along the row (ne0 = K, the inner matmul dim)
+    let q8_ok = |t: &HostTensor| t.rank() == 2 && t.shape[1].is_multiple_of(32);
     unsafe {
         let ctx = g::ggml_init(g::ggml_init_params {
             mem_size: g::ggml_tensor_overhead() * (candidates.len() + 1),
@@ -302,8 +309,12 @@ fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
         }
         let mut tensors = HashMap::new();
         for (name, t) in &candidates {
-            let dtype = if half.contains(*name) { DType::F16 } else { DType::F32 };
-            let d = ggml::new_tensor(ctx, dtype, &t.shape)?;
+            let d = if half.contains(*name) && quant && q8_ok(t) {
+                ggml::new_tensor_typed(ctx, g::ggml_type_GGML_TYPE_Q8_0, &t.shape)?
+            } else {
+                let dtype = if half.contains(*name) { DType::F16 } else { DType::F32 };
+                ggml::new_tensor(ctx, dtype, &t.shape)?
+            };
             ggml::set_name(d.t, name);
             tensors.insert((*name).clone(), d);
         }
@@ -321,7 +332,26 @@ fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
         for (name, t) in &candidates {
             let d = tensors[*name];
             let f16 = half.contains(*name);
-            let len = if f16 {
+            let len = if f16 && quant && q8_ok(t) {
+                let src = t.as_f32();
+                let (rows, cols) = (t.shape[0] as i64, t.shape[1] as i64);
+                let cap = g::ggml_row_size(g::ggml_type_GGML_TYPE_Q8_0, cols) * rows as usize;
+                let mut dst = vec![0u8; cap];
+                let written = g::ggml_quantize_chunk(
+                    g::ggml_type_GGML_TYPE_Q8_0,
+                    src.as_ptr(),
+                    dst.as_mut_ptr().cast(),
+                    0,
+                    rows,
+                    cols,
+                    std::ptr::null(),
+                );
+                g::ggml_backend_tensor_set(d.t, dst.as_ptr().cast(), 0, written);
+                n_f16 += 1;
+                f16_bytes += written;
+                tracing::trace!(name = %name, rows, cols, bytes = written, "weight quantised q8_0");
+                written
+            } else if f16 {
                 let data = t.to_bytes(DType::F16)?;
                 g::ggml_backend_tensor_set(d.t, data.as_ptr().cast(), 0, data.len());
                 n_f16 += 1;

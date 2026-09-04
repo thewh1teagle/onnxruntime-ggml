@@ -65,6 +65,7 @@ pub const HOST_OPS: &[&str] = &[
     "LayerNormalization",
     "Conv",
     "ConvTranspose",
+    "FusedAttention",
     "GeluErf",
     "Clip",
     "Max",
@@ -85,7 +86,7 @@ pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTenso
         | "Elu" | "Relu" | "Erf" | "Reciprocal" | "Floor" | "Ceil" | "Greater" | "GreaterOrEqual" | "Less" | "LessOrEqual"
         | "Equal" | "And" | "Or" | "Not" | "ReduceMean" | "ReduceSum" | "ReduceProd" | "ReduceMax" | "ReduceMin" | "Softmax"
         | "GeluErf" | "Clip" | "Max" | "Min" => eval_math::eval(node, inputs)?,
-        "MatMul" | "Gemm" | "LayerNormalization" | "Conv" | "ConvTranspose" => eval_nn::eval(node, inputs)?,
+        "MatMul" | "Gemm" | "LayerNormalization" | "Conv" | "ConvTranspose" | "FusedAttention" => eval_nn::eval(node, inputs)?,
         other => return Err(Error::unsupported(format!("host op {other}"))),
     };
     tracing::trace!(node = %node, outputs = ?outs.iter().map(|t| t.brief()).collect::<Vec<_>>(), "host eval");

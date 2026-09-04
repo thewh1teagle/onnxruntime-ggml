@@ -5,7 +5,7 @@
 //! reads the intermediates, then `splice` one new node in at the position of
 //! the earliest node removed (which is after every producer it reads).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ir::{Graph, Node};
 
@@ -322,5 +322,183 @@ mod tests {
         assert_eq!(n.outputs, vec!["y"]);
         assert_eq!(n.attr_i("axis", 0), -1);
         assert!((n.attr_f("epsilon", 0.0) - 1e-5).abs() < 1e-12);
+    }
+}
+
+// ---------------------------------------------------------------- attention
+
+/// Insert `new` where the last removed node stood (all of its inputs exist by then).
+fn splice_at_last(graph: &mut Graph, remove: &[usize], new: Node) {
+    let last = *remove.iter().max().expect("splice with no nodes to remove");
+    let removed: HashSet<usize> = remove.iter().copied().collect();
+    let mut new = Some(new);
+    let mut nodes = Vec::with_capacity(graph.nodes.len());
+    for (i, n) in graph.nodes.drain(..).enumerate() {
+        if !removed.contains(&i) {
+            nodes.push(n);
+        }
+        if i == last {
+            nodes.push(new.take().expect("splice inserts once"));
+        }
+    }
+    graph.nodes = nodes;
+}
+
+/// Drop nodes whose outputs nobody reads (left behind by a fusion), repeatedly.
+pub fn prune_dead_nodes(graph: &mut Graph) -> usize {
+    let mut removed = 0usize;
+    loop {
+        let counts = graph.consumer_counts();
+        let dead: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.outputs.iter().all(|o| o.is_empty() || counts.get(o.as_str()).copied().unwrap_or(0) == 0))
+            .map(|(i, _)| i)
+            .collect();
+        if dead.is_empty() {
+            break;
+        }
+        let dead: HashSet<usize> = dead.into_iter().collect();
+        removed += dead.len();
+        let nodes = std::mem::take(&mut graph.nodes);
+        graph.nodes = nodes.into_iter().enumerate().filter(|(i, _)| !dead.contains(i)).map(|(_, n)| n).collect();
+    }
+    if removed > 0 {
+        tracing::debug!(removed, "dead nodes pruned");
+    }
+    removed
+}
+
+fn is_neg_inf_fill(graph: &Graph, name: &str, producers: &HashMap<&str, usize>) -> bool {
+    if let Some(t) = graph.constants.get(name) {
+        return t.numel() >= 1 && t.as_f64().iter().all(|&v| v <= -1e30);
+    }
+    match producers.get(name).map(|&i| &graph.nodes[i]) {
+        Some(n) if n.op == "ConstantOfShape" => n.attr_tensor("value").map(|v| v.as_f64()[0] <= -1e30).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// `Softmax(scale * Q·Kᵀ [masked]) · V` into one `FusedAttention(q, k, v[, mask])`.
+///
+/// Anchored at every `Softmax(axis=-1)` whose only consumer is a `MatMul`
+/// taking it as the left operand. Walking up from the softmax: an optional
+/// `Where(cond, x, -inf)` (the mask), an optional `Div`/`Mul` by a scalar
+/// (the scale), then the `MatMul(q, kᵀ)`. Q, K and V are passed in the
+/// layouts the export produced (`[.., T, D]`, `[.., D, S]`, `[.., S, D]`);
+/// the emitter permutes. The exporter's trailing Transpose/Reshape stay.
+pub fn fuse_attention(graph: &mut Graph) -> usize {
+    let mut fused = 0usize;
+    loop {
+        let producers = graph.producers();
+        let consumers = graph.consumer_counts();
+        let mut found: Option<(Vec<usize>, Node)> = None;
+        for (si, sm) in graph.nodes.iter().enumerate() {
+            if sm.op != "Softmax" || sm.attr_i("axis", -1) != -1 {
+                continue;
+            }
+            let sm_out = sm.outputs[0].as_str();
+            if consumers.get(sm_out) != Some(&1) {
+                continue;
+            }
+            let Some((mi, mm2)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "MatMul" && n.inputs[0] == sm_out) else {
+                continue;
+            };
+            let mut remove = vec![si, mi];
+            let mut x = sm.inputs[0].clone();
+            let mut mask: Option<String> = None;
+            let mut scale = 1.0f64;
+            let mut mm1: Option<usize> = None;
+            let mut ok = true;
+            for _ in 0..4 {
+                let Some(&pi) = producers.get(x.as_str()) else {
+                    ok = false;
+                    break;
+                };
+                if consumers.get(x.as_str()) != Some(&1) {
+                    ok = false;
+                    break;
+                }
+                let p = &graph.nodes[pi];
+                match p.op.as_str() {
+                    "Where" if mask.is_none() && is_neg_inf_fill(graph, &p.inputs[2], &producers) => {
+                        mask = Some(p.inputs[0].clone());
+                        x = p.inputs[1].clone();
+                        remove.push(pi);
+                    }
+                    "Div" | "Mul" => {
+                        let Some(c) =
+                            graph.constants.get(&p.inputs[1]).filter(|t| t.numel() == 1).and_then(|t| t.scalar_f64().ok())
+                        else {
+                            ok = false;
+                            break;
+                        };
+                        scale = if p.op == "Div" { scale / c } else { scale * c };
+                        x = p.inputs[0].clone();
+                        remove.push(pi);
+                    }
+                    "MatMul" => {
+                        mm1 = Some(pi);
+                        remove.push(pi);
+                        break;
+                    }
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            let (Some(mm1), true) = (mm1, ok) else { continue };
+            let q = graph.nodes[mm1].inputs[0].clone();
+            let k = graph.nodes[mm1].inputs[1].clone();
+            let v = mm2.inputs[1].clone();
+            let out = mm2.outputs[0].clone();
+            let mut inputs = vec![q.as_str(), k.as_str(), v.as_str()];
+            if let Some(m) = &mask {
+                inputs.push(m.as_str());
+            }
+            let mut node = Node::new("FusedAttention", &format!("{}_fused", sm.name), &inputs, &[&out]);
+            node.attrs.insert("scale".into(), crate::ir::Attr::Float(scale as f32));
+            found = Some((remove, node));
+            break;
+        }
+        let Some((remove, node)) = found else { break };
+        tracing::trace!(node = %node.name, inputs = ?node.inputs, "fused attention");
+        splice_at_last(graph, &remove, node);
+        fused += 1;
+    }
+    if fused > 0 {
+        let pruned = prune_dead_nodes(graph);
+        tracing::info!(fused, pruned, "attention fusion");
+    }
+    fused
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+    use crate::host::tensor::HostTensor;
+    use crate::ir::ValueDesc;
+
+    #[test]
+    fn fuses_masked_scaled_attention() {
+        let mut g = Graph::default();
+        g.constants.insert("eight".into(), std::sync::Arc::new(HostTensor::scalar_f32(8.0)));
+        g.constants.insert("ninf".into(), std::sync::Arc::new(HostTensor::scalar_f32(f32::NEG_INFINITY)));
+        g.nodes.push(Node::new("MatMul", "mm1", &["q", "kt"], &["s"]));
+        g.nodes.push(Node::new("Div", "div", &["s", "eight"], &["sd"]));
+        g.nodes.push(Node::new("Where", "where", &["mask", "sd", "ninf"], &["sm_in"]));
+        let mut sm = Node::new("Softmax", "sm", &["sm_in"], &["p"]);
+        sm.set_attr_i("axis", -1);
+        g.nodes.push(sm);
+        g.nodes.push(Node::new("MatMul", "mm2", &["p", "v"], &["y"]));
+        g.outputs.push(ValueDesc { name: "y".into(), dtype: crate::ir::DType::F32, shape: vec![] });
+        assert_eq!(fuse_attention(&mut g), 1);
+        assert_eq!(g.nodes.len(), 1);
+        let n = &g.nodes[0];
+        assert_eq!(n.op, "FusedAttention");
+        assert_eq!(n.inputs, vec!["q", "kt", "v", "mask"]);
+        assert!((n.attr_f("scale", 0.0) - 0.125).abs() < 1e-7);
     }
 }

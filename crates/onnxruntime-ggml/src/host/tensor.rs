@@ -113,9 +113,9 @@ impl HostTensor {
         let mut out = Vec::with_capacity(self.numel() * dtype.size());
         match dtype {
             DType::F32 => {
-                for v in self.as_f32().iter() {
-                    out.extend_from_slice(&v.to_le_bytes());
-                }
+                // one memcpy on little-endian targets, which is every target we build for
+                let v = self.as_f32();
+                out.extend_from_slice(unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) });
             }
             DType::F16 => {
                 for v in self.as_f32().iter() {

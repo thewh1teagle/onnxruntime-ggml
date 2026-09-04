@@ -48,6 +48,9 @@ struct Entry {
     d: DeviceTensor,
     fp: u64,
     nbytes: usize,
+    /// Hits since the content last changed. Zero at a change means it changed
+    /// on consecutive runs: a per-step cache, not worth keeping resident.
+    hits_since_change: usize,
 }
 
 impl Drop for Entry {
@@ -98,20 +101,35 @@ impl Sticky {
         let fp = fingerprint(data);
         let nbytes = data.len() * 4;
         tracing::trace!(name, nbytes, fp_us = t_fp.elapsed().as_micros() as u64, "sticky fingerprint");
-        if let Some(e) = self.entries.get(name) {
+        if let Some(e) = self.entries.get_mut(name) {
             if e.nbytes == nbytes && e.d.shape() == shape && e.fp == fp {
+                e.hits_since_change += 1;
                 self.stats.hits += 1;
                 self.stats.bytes_saved += nbytes;
                 tracing::trace!(name, bytes = nbytes, "sticky hit");
                 return Ok(Some(e.d));
             }
-            // It changed once; it will change again. Give the buffer back and
-            // let the ordinary per-graph upload path have it from now on.
+            if e.hits_since_change == 0 {
+                // Changed on consecutive runs (a growing per-step cache): give
+                // the buffer back and let the per-graph upload path have it.
+                self.entries.remove(name);
+                self.volatile.insert(name.to_owned());
+                self.stats.misses += 1;
+                tracing::debug!(name, bytes = nbytes, "sticky input changes every run, not kept resident");
+                return Ok(None);
+            }
+            // Changed after a run of hits (a new utterance, a new window): refresh in place.
+            let hits = e.hits_since_change;
+            if e.nbytes == nbytes && e.d.shape() == shape {
+                unsafe { g::ggml_backend_tensor_set(e.d.t, data.as_ptr().cast(), 0, nbytes) };
+                e.fp = fp;
+                e.hits_since_change = 0;
+                self.stats.misses += 1;
+                tracing::debug!(name, bytes = nbytes, hits, "sticky input changed, refreshed in place");
+                return Ok(Some(e.d));
+            }
             self.entries.remove(name);
-            self.volatile.insert(name.to_owned());
-            self.stats.misses += 1;
-            tracing::debug!(name, bytes = nbytes, "sticky input changed, not kept resident");
-            return Ok(None);
+            tracing::debug!(name, bytes = nbytes, hits, "sticky input changed shape, reallocated");
         }
         let e = unsafe { alloc(backend, name, shape, data, fp)? };
         let d = e.d;
@@ -146,7 +164,7 @@ unsafe fn alloc(backend: &Backend, name: &str, shape: &[usize], data: &[f32], fp
     }
     let nbytes = data.len() * 4;
     g::ggml_backend_tensor_set(d.t, data.as_ptr().cast(), 0, nbytes);
-    Ok(Entry { ctx, buffer, d, fp, nbytes })
+    Ok(Entry { ctx, buffer, d, fp, nbytes, hits_since_change: 0 })
 }
 
 /// FNV-1a over the length, the two ends and a stride of samples. Cheap enough

@@ -63,6 +63,21 @@ pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTenso
             let attrs = ConvAttrs::from_node(node)?;
             conv_transpose1d(x, w, b, &attrs)?
         }
+        "FusedAttention" => {
+            let q = need(node, inputs, 0)?;
+            let k = need(node, inputs, 1)?;
+            let v = need(node, inputs, 2)?;
+            let mut scores = matmul(q, k)?;
+            let scale = node.attr_f("scale", 1.0);
+            if (scale - 1.0).abs() > 1e-9 {
+                scores = HostTensor::f32(scores.shape.clone(), scores.as_f32().iter().map(|x| x * scale).collect());
+            }
+            if let Some(mask) = inputs.get(3).copied().flatten() {
+                scores = crate::host::eval_shape::where_(mask, &scores, &HostTensor::scalar_f32(f32::NEG_INFINITY))?;
+            }
+            let p = crate::host::eval_math::softmax(&scores, scores.rank() - 1)?;
+            matmul(&p, v)?
+        }
         other => return Err(Error::unsupported(format!("host nn op {other}"))),
     };
     Ok(vec![out])

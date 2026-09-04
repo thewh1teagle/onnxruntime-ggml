@@ -87,11 +87,17 @@ pub unsafe fn write_output(ctx: *mut OrtKernelContext, index: usize, t: &HostTen
     let dims: Vec<i64> = t.shape.iter().map(|&d| d as i64).collect();
     let mut value: *mut OrtValue = std::ptr::null_mut();
     ort_call!(KernelContext_GetOutput(ctx, index, dims.as_ptr(), dims.len(), &mut value))?;
-    let bytes = t.to_bytes(dtype)?;
-    if !bytes.is_empty() {
+    if t.numel() > 0 {
         let mut data: *mut std::os::raw::c_void = std::ptr::null_mut();
         ort_call!(GetTensorMutableData(value, &mut data))?;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), data as *mut u8, bytes.len());
+        if dtype == DType::F32 && t.dtype() == DType::F32 {
+            // straight from the tensor's storage into onnxruntime's buffer
+            let v = t.as_f32();
+            std::ptr::copy_nonoverlapping(v.as_ptr() as *const u8, data as *mut u8, v.len() * 4);
+        } else {
+            let bytes = t.to_bytes(dtype)?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data as *mut u8, bytes.len());
+        }
     }
     tracing::trace!(index, tensor = %t.brief(), dtype = %dtype, "kernel output");
     Ok(())

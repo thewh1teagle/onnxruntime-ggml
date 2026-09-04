@@ -12,6 +12,7 @@
 //! - `ops_*`   : the ONNX -> ggml op emitters
 //! - `value`   : what a runtime value is (host, staged-for-device, or device)
 
+pub mod attention;
 pub mod backend;
 pub mod fold;
 pub mod fusion;
