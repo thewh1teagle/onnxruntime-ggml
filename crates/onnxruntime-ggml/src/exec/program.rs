@@ -8,7 +8,7 @@
 //! 4. upload the float constants to the primary backend, once
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ggml_sys as g;
@@ -18,6 +18,7 @@ use crate::exec::backend::{Backend, WeightPrecision};
 use crate::exec::fusion;
 use crate::exec::ggml::{self, Ctx};
 use crate::exec::runtime::Run;
+use crate::exec::sticky::Sticky;
 use crate::exec::value::DeviceTensor;
 use crate::host::eval;
 use crate::host::eval_shape::transpose;
@@ -74,6 +75,10 @@ pub struct Program {
     pub weights: Weights,
     pub last_use: HashMap<String, usize>,
     pub stats: CompileStats,
+    /// Names of the graph inputs, for the sticky-input lookup.
+    pub input_names: HashSet<String>,
+    /// Graph inputs kept resident on the device across runs (`sticky` option).
+    pub sticky: Mutex<Sticky>,
 }
 
 impl Program {
@@ -122,7 +127,17 @@ impl Program {
         for (op, n) in graph.op_histogram() {
             tracing::debug!(op, n, "op after compile");
         }
-        Ok(Program { name: name.to_owned(), graph, backend, weights, last_use, stats })
+        let input_names = graph.inputs.iter().map(|d| d.name.clone()).collect();
+        Ok(Program {
+            name: name.to_owned(),
+            graph,
+            backend,
+            weights,
+            last_use,
+            stats,
+            input_names,
+            sticky: Mutex::new(Sticky::default()),
+        })
     }
 
     /// Run the program on host inputs given in `graph.inputs` order; returns
@@ -142,13 +157,13 @@ pub fn fold_constants(graph: &mut Graph) -> Result<usize> {
     for node in nodes {
         let all_const = node.inputs.iter().all(|i| i.is_empty() || graph.constants.contains_key(i));
         if all_const && eval::supported(&node.op) && !node.outputs.iter().any(|o| graph.outputs.iter().any(|d| &d.name == o)) {
-            let ins: Vec<Option<&HostTensor>> = node.inputs.iter().map(|i| graph.constants.get(i)).collect();
+            let ins: Vec<Option<&HostTensor>> = node.inputs.iter().map(|i| graph.constants.get(i).map(|t| &**t)).collect();
             match eval::eval(&node, &ins) {
                 Ok(outs) => {
                     for (name, t) in node.outputs.iter().zip(outs) {
                         if !name.is_empty() {
                             tracing::trace!(node = %node, value = name, result = %t.brief(), "folded");
-                            graph.constants.insert(name.clone(), t);
+                            graph.constants.insert(name.clone(), Arc::new(t));
                         }
                     }
                     folded += 1;
@@ -205,7 +220,7 @@ pub fn pretranspose_weights(graph: &mut Graph) -> Result<usize> {
         }
     }
     for (k, v) in new_consts {
-        graph.constants.insert(k, v);
+        graph.constants.insert(k, Arc::new(v));
     }
     if n > 0 {
         tracing::info!(n, "weights pre-transposed for mul_mat");
@@ -269,7 +284,7 @@ fn mul_mat_weights(graph: &Graph) -> HashSet<String> {
 /// takes an F16 src0 against an F32 src1 on both Metal and CPU, which halves
 /// the bytes read per matmul. Vectors (biases, norm scales) stay F32.
 fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
-    let candidates: Vec<(&String, &HostTensor)> =
+    let candidates: Vec<(&String, &Arc<HostTensor>)> =
         graph.constants.iter().filter(|(_, t)| t.dtype().is_float() && t.rank() <= ggml::MAX_RANK && t.numel() > 0).collect();
     let half = match backend.options.weights {
         WeightPrecision::F16 => mul_mat_weights(graph),
@@ -344,11 +359,11 @@ mod tests {
     #[test]
     fn folds_constant_chain() {
         let mut graph = Graph::default();
-        graph.constants.insert("a".into(), HostTensor::i64(vec![2], vec![2, 3]));
+        graph.constants.insert("a".into(), Arc::new(HostTensor::i64(vec![2], vec![2, 3])));
         graph.nodes.push(Node::new("ReduceProd", "p", &["a"], &["prod"]));
         let mut u = Node::new("Unsqueeze", "u", &["prod", "ax"], &["out"]);
         u.attrs.insert("keepdims".into(), Attr::Int(0));
-        graph.constants.insert("ax".into(), HostTensor::i64(vec![1], vec![0]));
+        graph.constants.insert("ax".into(), Arc::new(HostTensor::i64(vec![1], vec![0])));
         graph.nodes.push(u);
         graph.outputs.push(desc("out"));
         // last node feeds a graph output, so it stays; the ReduceProd folds
@@ -361,7 +376,7 @@ mod tests {
     #[test]
     fn transposes_matmul_weights() {
         let mut graph = Graph::default();
-        graph.constants.insert("w".into(), HostTensor::f32(vec![2, 3], vec![1., 2., 3., 4., 5., 6.]));
+        graph.constants.insert("w".into(), Arc::new(HostTensor::f32(vec![2, 3], vec![1., 2., 3., 4., 5., 6.])));
         graph.nodes.push(Node::new("MatMul", "mm", &["x", "w"], &["y"]));
         assert_eq!(pretranspose_weights(&mut graph).unwrap(), 1);
         assert_eq!(graph.nodes[0].inputs[1], "w__T");

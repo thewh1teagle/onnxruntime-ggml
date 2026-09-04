@@ -18,6 +18,7 @@ onnxruntime stores them as session config entries `ep.ggml.<key>`, which is also
 | `dump` | `0`, `1` | `0` | log every intermediate value at trace level |
 | `accel` | `0`, `1` | `0` | add ggml's ACCEL backends (BLAS on macOS) to the scheduler |
 | `weights` | `f32`, `f16` | `f16` | storage type of the resident 2-D matmul weights |
+| `sticky` | `0`, `1` | `1` | keep large unchanged float graph inputs resident on the device between runs |
 
 ### `weights`
 
@@ -32,13 +33,33 @@ takes the resident weights from 2.37 GiB to 1.20 GiB and one window from 688 ms
 to 623 ms. Set `f32` if the extra rounding matters: the weights are rounded
 once, so the error is that of an f16 weight matrix, not of f16 accumulation.
 
+### `sticky`
+
+A decode step of an encoder-decoder model hands the provider the encoder
+cross-attention KV caches as ordinary graph inputs: for
+whisper-large-v3-turbo, 61 MiB of f32 that is bit-identical at every step.
+With `sticky=1` each float graph input of at least 256 KiB gets a device
+buffer owned by the compiled program, and a run re-uses it when the input
+looks unchanged.
+
+"Looks unchanged" is a *fingerprint*, not a comparison: the byte length, the
+shape, and a hash of the first and last 64 elements plus 512 samples spread
+across the tensor. A change that touches none of the sampled elements would be
+missed; hashing every byte would cost what the upload costs. An input whose
+fingerprint ever changes is marked volatile and goes back to per-run uploads,
+so a growing self-attention cache pays one buffer allocation, once. Set
+`sticky=0` if a model needs the guarantee.
+
+`ORT_GGML_LOG=debug` prints `sticky_hits`, `sticky_misses` and `sticky_saved`
+per run.
+
 ## Environment
 
 Lower precedence than session options.
 
 | variable | meaning |
 |---|---|
-| `ORT_GGML_DEVICE`, `ORT_GGML_THREADS`, `ORT_GGML_PARTIAL`, `ORT_GGML_DUMP`, `ORT_GGML_ACCEL`, `ORT_GGML_WEIGHTS` | the options above |
+| `ORT_GGML_DEVICE`, `ORT_GGML_THREADS`, `ORT_GGML_PARTIAL`, `ORT_GGML_DUMP`, `ORT_GGML_ACCEL`, `ORT_GGML_WEIGHTS`, `ORT_GGML_STICKY` | the options above |
 | `ORT_GGML_LOG` | tracing filter: `info` (default), `debug`, `trace`, or a full `EnvFilter` directive |
 | `ORT_GGML_CPU_VARIANT` | x86_64 only: `avx2` or `baseline` to override CPU feature detection |
 | `ONNXRUNTIME_GGML_LIBRARY` | path of the provider library, instead of the one bundled in the wheel |
@@ -57,4 +78,6 @@ DEBUG run host_ops=402 device_ops=1015 fallbacks=3 flushes=1 uploads=31 upload=2
 
 - `claimed < total`: some op is unsupported; the warning above names it.
 - `fallbacks`: device emitters that declined a shape; `debug` says which and why.
+- `sticky_hits` low on a decode loop: the caller is rebuilding the constant
+  cross-attention caches (a copy or a cast) between steps.
 - `flushes > 1` per run: a host op needed a device value mid-graph; `trace` shows the node.

@@ -30,6 +30,11 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
+# prefer a fresh development build over whatever is bundled in python/
+for _name in ("libonnxruntime_ggml.dylib", "libonnxruntime_ggml.so", "onnxruntime_ggml.dll"):
+    _p = ROOT / "target" / "release" / _name
+    if _p.exists():
+        os.environ.setdefault("ONNXRUNTIME_GGML_LIBRARY", str(_p))
 
 SAMPLE_RATE = 16000
 WINDOW = 30 * SAMPLE_RATE

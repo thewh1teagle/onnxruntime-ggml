@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::exec::backend::GRAPH_SIZE;
 use crate::exec::ggml::{self, Ctx};
 use crate::exec::program::Program;
+use crate::exec::sticky::Sticky;
 use crate::exec::value::{DeviceTensor, Value};
 use crate::exec::{ops_binary, ops_nn, ops_shape};
 use crate::host::eval;
@@ -128,6 +129,12 @@ pub struct RunStats {
     pub host_ms: f64,
     pub build_ms: f64,
     pub compute_ms: f64,
+    /// Time spent walking nodes and building the ggml graph (host ops and
+    /// flushes excluded).
+    pub emit_ms: f64,
+    pub sticky_hits: usize,
+    pub sticky_misses: usize,
+    pub sticky_saved: usize,
 }
 
 pub struct Run<'p> {
@@ -189,7 +196,7 @@ impl<'p> Run<'p> {
             return Some(v.clone());
         }
         let c = self.prog.graph.constants.get(name)?;
-        Some(if c.dtype().is_float() { Value::staged_of(c.clone()) } else { Value::host_of(c.clone()) })
+        Some(if c.dtype().is_float() { Value::Staged(c.clone()) } else { Value::Host(c.clone()) })
     }
 
     /// A pre-uploaded weight, if this name is one.
@@ -229,10 +236,42 @@ impl<'p> Run<'p> {
                 if let Some(d) = self.cached(&i.name, false) {
                     return Ok(d);
                 }
+                if let Some(d) = self.sticky(&i.name, t)? {
+                    self.uploaded.insert(format!("{}#raw", i.name), d);
+                    return Ok(d);
+                }
                 let t = t.clone();
                 let d = self.upload(&t, &i.name)?;
                 self.uploaded.insert(format!("{}#raw", i.name), d);
                 Ok(d)
+            }
+        }
+    }
+
+    /// A graph input kept resident on the device across runs, if this is one
+    /// and the `sticky` option is on (`exec::sticky`).
+    fn sticky(&mut self, name: &str, t: &HostTensor) -> Result<Option<DeviceTensor>> {
+        if !self.prog.backend.options.sticky || !self.prog.input_names.contains(name) || !Sticky::eligible(t) {
+            return Ok(None);
+        }
+        let mut sticky = self.prog.sticky.lock().map_err(|_| Error::internal("sticky cache poisoned"))?;
+        let before = sticky.stats.hits;
+        let d = sticky.get(&self.prog.backend, name, t)?;
+        match (d, sticky.stats.hits > before) {
+            (Some(d), true) => {
+                self.stats.sticky_hits += 1;
+                self.stats.sticky_saved += t.numel() * 4;
+                Ok(Some(d))
+            }
+            (Some(d), false) => {
+                self.stats.sticky_misses += 1;
+                self.stats.uploads += 1;
+                self.stats.upload_bytes += t.numel() * 4;
+                Ok(Some(d))
+            }
+            (None, _) => {
+                self.stats.sticky_misses += 1;
+                Ok(None)
             }
         }
     }
@@ -251,6 +290,10 @@ impl<'p> Run<'p> {
                     return Ok(w);
                 }
                 if let Some(d) = self.cached(&i.name, true) {
+                    return Ok(d);
+                }
+                if let Some(d) = self.sticky(&i.name, t)? {
+                    self.uploaded.insert(format!("{}#f32", i.name), d);
                     return Ok(d);
                 }
                 let t = if t.dtype() == DType::F32 { t.clone() } else { Arc::new(t.cast(DType::F32)) };
@@ -313,6 +356,7 @@ impl<'p> Run<'p> {
                 return Err(Error::ggml(format!("graph compute failed with status {status} ({reason})")));
             }
             let t_compute = started.elapsed() - t_alloc;
+            let t_read0 = Instant::now();
             let mut read_bytes = 0usize;
             for (name, d) in &outs {
                 let n = ggml::nelements(d.t);
@@ -323,12 +367,16 @@ impl<'p> Run<'p> {
                 tracing::trace!(name = %name, value = %t.brief(), "readback");
                 self.values.insert(name.clone(), Value::staged_of(t));
             }
+            let t_read = t_read0.elapsed();
+            let t_reset0 = Instant::now();
             g::ggml_backend_sched_reset(sched);
-            g::ggml_free(self.ctx);
-            self.ctx = std::ptr::null_mut();
-            let (ctx, graph) = new_graph_ctx()?;
-            self.ctx = ctx;
-            self.graph = graph;
+            // Reuse the context's arena: freeing it would mean another ~12 MiB
+            // allocation for the next graph, per flush.
+            g::ggml_reset(self.ctx);
+            self.graph = g::ggml_new_graph_custom(self.ctx, GRAPH_SIZE, false);
+            if self.graph.is_null() {
+                return Err(Error::ggml("ggml_new_graph_custom failed after a flush"));
+            }
             self.uploads.clear();
             self.uploaded.clear();
             self.stats.flushes += 1;
@@ -344,6 +392,8 @@ impl<'p> Run<'p> {
                 readback = %bytes(read_bytes),
                 alloc_ms = format!("{:.2}", t_alloc.as_secs_f64() * 1000.0),
                 compute_ms = format!("{:.2}", t_compute.as_secs_f64() * 1000.0),
+                read_ms = format!("{:.2}", t_read.as_secs_f64() * 1000.0),
+                reset_ms = format!("{:.2}", t_reset0.elapsed().as_secs_f64() * 1000.0),
                 "flush"
             );
         }
@@ -392,7 +442,9 @@ impl<'p> Run<'p> {
                     ins.push(Some(In { name: name.clone(), v }));
                 }
             }
+            let t_node = Instant::now();
             let outs = self.run_node(node, ins)?;
+            self.stats.emit_ms += t_node.elapsed().as_secs_f64() * 1000.0;
             for (name, v) in node.outputs.iter().zip(outs) {
                 if !name.is_empty() {
                     if self.prog.backend.options.dump {
@@ -430,10 +482,14 @@ impl<'p> Run<'p> {
             flushes = s.flushes,
             uploads = s.uploads,
             upload = %bytes(s.upload_bytes),
+            sticky_hits = s.sticky_hits,
+            sticky_misses = s.sticky_misses,
+            sticky_saved = %bytes(s.sticky_saved),
             readbacks = s.readbacks,
             readback = %bytes(s.readback_bytes),
             ggml_nodes = s.ggml_nodes,
             host_ms = format!("{:.2}", s.host_ms),
+            emit_ms = format!("{:.2}", s.emit_ms),
             alloc_ms = format!("{:.2}", s.build_ms),
             compute_ms = format!("{:.2}", s.compute_ms),
             total_ms = format!("{:.2}", total),

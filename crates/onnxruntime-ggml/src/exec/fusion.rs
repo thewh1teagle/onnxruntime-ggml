@@ -264,6 +264,8 @@ pub fn fuse_layer_norm(graph: &mut Graph) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::host::tensor::HostTensor;
     use crate::ir::{Attr, DType, ValueDesc};
@@ -275,9 +277,9 @@ mod tests {
     #[test]
     fn fuses_gelu() {
         let mut graph = Graph::default();
-        graph.constants.insert("sqrt2".into(), HostTensor::scalar_f32(std::f32::consts::SQRT_2));
-        graph.constants.insert("one".into(), HostTensor::scalar_f32(1.0));
-        graph.constants.insert("half".into(), HostTensor::scalar_f32(0.5));
+        graph.constants.insert("sqrt2".into(), Arc::new(HostTensor::scalar_f32(std::f32::consts::SQRT_2)));
+        graph.constants.insert("one".into(), Arc::new(HostTensor::scalar_f32(1.0)));
+        graph.constants.insert("half".into(), Arc::new(HostTensor::scalar_f32(0.5)));
         graph.nodes.push(Node::new("Div", "d", &["x", "sqrt2"], &["d_out"]));
         graph.nodes.push(Node::new("Erf", "e", &["d_out"], &["e_out"]));
         graph.nodes.push(Node::new("Add", "a", &["e_out", "one"], &["a_out"]));
@@ -294,10 +296,10 @@ mod tests {
     #[test]
     fn fuses_layer_norm() {
         let mut graph = Graph::default();
-        graph.constants.insert("two".into(), HostTensor::scalar_f32(2.0));
-        graph.constants.insert("eps".into(), HostTensor::scalar_f32(1e-5));
-        graph.constants.insert("w".into(), HostTensor::f32(vec![2], vec![1.0, 1.0]));
-        graph.constants.insert("b".into(), HostTensor::f32(vec![2], vec![0.0, 0.0]));
+        graph.constants.insert("two".into(), Arc::new(HostTensor::scalar_f32(2.0)));
+        graph.constants.insert("eps".into(), Arc::new(HostTensor::scalar_f32(1e-5)));
+        graph.constants.insert("w".into(), Arc::new(HostTensor::f32(vec![2], vec![1.0, 1.0])));
+        graph.constants.insert("b".into(), Arc::new(HostTensor::f32(vec![2], vec![0.0, 0.0])));
         let mut mean = Node::new("ReduceMean", "rm", &["x"], &["m"]);
         mean.attrs.insert("axes".into(), Attr::Ints(vec![-1]));
         graph.nodes.push(mean);

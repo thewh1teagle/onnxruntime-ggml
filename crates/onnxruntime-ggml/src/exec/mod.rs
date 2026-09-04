@@ -6,6 +6,7 @@
 //! - `ggml`    : safe helpers over ggml tensors (shape convention, views, cont)
 //! - `program` : compile an `ir::Graph`: fold constants, rewrite patterns,
 //!               upload weights once
+//! - `sticky`  : graph inputs kept resident on the device between runs
 //! - `runtime` : run a compiled program: walk nodes, keep shape math on the
 //!               host, emit ggml ops for the rest, move data only at boundaries
 //! - `ops_*`   : the ONNX -> ggml op emitters
@@ -20,6 +21,7 @@ pub mod ops_nn;
 pub mod ops_shape;
 pub mod program;
 pub mod runtime;
+pub mod sticky;
 pub mod value;
 
 pub use program::Program;

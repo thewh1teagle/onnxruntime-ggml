@@ -41,7 +41,7 @@ pub unsafe fn import(graph: *const OrtGraph) -> Result<Graph> {
         let t = read_value(value)?;
         init_bytes += t.nbytes();
         tracing::trace!(name = %name, tensor = %t.brief(), "initializer");
-        out.constants.insert(name, t);
+        out.constants.insert(name, std::sync::Arc::new(t));
     }
 
     let mut n_nodes = 0usize;

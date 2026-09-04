@@ -550,20 +550,39 @@ def matmul_f16_weights():
     return m, {"x": f32(4, 256)}, 1e-2, 1e-2
 
 
+@case
+def sticky_input_changed():
+    # A float graph input above exec::sticky::MIN_BYTES is kept resident on the
+    # device between runs and re-uploaded only when its fingerprint changes.
+    # Three runs on one session: same data twice (a hit), then new data.
+    nodes = [helper.make_node("MatMul", ["x", "w"], ["y"])]
+    w = (rng.standard_normal((64, 8)) * 0.1).astype(np.float32)
+    m = model(nodes, [tin("x", [2000, 64])], [tin("y", [2000, 8])], [const("w", w)])
+    a = f32(2000, 64)
+    feeds = [{"x": a}, {"x": a.copy()}, {"x": f32(2000, 64)}, {"x": a}]
+    # the weight goes to the device as f16 by default, hence the tolerance
+    return m, feeds, 1e-2, 1e-2
+
+
 def run_case(name, fn) -> tuple[bool, list[str]]:
     lines = []
     try:
         mbytes, feeds, atol, rtol, *rest = fn()
         cpu, g = C.sessions(mbytes, rest[0] if rest else None)
 
-        ref = cpu.run(None, feeds)
-        out = g.run(None, feeds)
+        # a case may give a list of feeds: one session, several runs in order
+        # (that is how the sticky-input cache is exercised)
+        runs = feeds if isinstance(feeds, list) else [feeds]
         names = [o.name for o in cpu.get_outputs()]
         ok = True
-        for n, a, b in zip(names, ref, out):
-            good, line = C.compare(n, np.asarray(a), np.asarray(b), atol, rtol)
-            ok = ok and good
-            lines.append("   " + line)
+        for r, feed in enumerate(runs):
+            ref = cpu.run(None, feed)
+            out = g.run(None, feed)
+            tag = "" if len(runs) == 1 else f"run{r} "
+            for n, a, b in zip(names, ref, out):
+                good, line = C.compare(tag + n, np.asarray(a), np.asarray(b), atol, rtol)
+                ok = ok and good
+                lines.append("   " + line)
         return ok, lines
     except Exception:  # noqa: BLE001
         lines.append("   " + traceback.format_exc().strip().replace("\n", "\n   "))

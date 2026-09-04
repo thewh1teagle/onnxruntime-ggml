@@ -3,6 +3,7 @@
 //! `exec::runtime` walks at run time.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::host::tensor::HostTensor;
@@ -190,8 +191,10 @@ pub struct Graph {
     pub name: String,
     pub inputs: Vec<ValueDesc>,
     pub outputs: Vec<ValueDesc>,
-    /// Initializers, plus anything constant folding produced.
-    pub constants: HashMap<String, HostTensor>,
+    /// Initializers, plus anything constant folding produced. Reference
+    /// counted: a run looks a constant up per node that reads it, and the
+    /// weight matrices are megabytes each.
+    pub constants: HashMap<String, Arc<HostTensor>>,
     /// Topologically ordered.
     pub nodes: Vec<Node>,
 }

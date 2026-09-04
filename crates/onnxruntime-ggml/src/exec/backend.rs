@@ -46,6 +46,10 @@ pub struct Options {
     pub accel: bool,
     /// Storage type for the 2-D weight matrices `ggml_mul_mat` reads as src0.
     pub weights: WeightPrecision,
+    /// Keep large float graph inputs resident on the device between runs and
+    /// re-upload only when a fingerprint of the host bytes changed
+    /// (`exec::sticky`).
+    pub sticky: bool,
 }
 
 impl Default for Options {
@@ -57,6 +61,7 @@ impl Default for Options {
             dump: false,
             accel: false,
             weights: WeightPrecision::F16,
+            sticky: true,
         }
     }
 }
@@ -68,7 +73,7 @@ fn default_threads() -> i32 {
 
 impl Options {
     /// Environment overrides: ORT_GGML_DEVICE, ORT_GGML_THREADS, ORT_GGML_PARTIAL,
-    /// ORT_GGML_DUMP, ORT_GGML_ACCEL, ORT_GGML_WEIGHTS.
+    /// ORT_GGML_DUMP, ORT_GGML_ACCEL, ORT_GGML_WEIGHTS, ORT_GGML_STICKY.
     pub fn from_env() -> Options {
         let mut o = Options::default();
         o.apply("device", std::env::var("ORT_GGML_DEVICE").ok().as_deref());
@@ -77,6 +82,7 @@ impl Options {
         o.apply("dump", std::env::var("ORT_GGML_DUMP").ok().as_deref());
         o.apply("accel", std::env::var("ORT_GGML_ACCEL").ok().as_deref());
         o.apply("weights", std::env::var("ORT_GGML_WEIGHTS").ok().as_deref());
+        o.apply("sticky", std::env::var("ORT_GGML_STICKY").ok().as_deref());
         o
     }
 
@@ -103,6 +109,7 @@ impl Options {
             "partial" => self.partial = matches!(v.as_str(), "1" | "true" | "yes"),
             "dump" => self.dump = matches!(v.as_str(), "1" | "true" | "yes"),
             "accel" => self.accel = matches!(v.as_str(), "1" | "true" | "yes"),
+            "sticky" => self.sticky = matches!(v.as_str(), "1" | "true" | "yes"),
             "weights" => {
                 self.weights = match v.as_str() {
                     "f16" | "fp16" | "half" | "" => WeightPrecision::F16,

@@ -28,6 +28,7 @@ Inside `onnxruntime-ggml`:
 | `host/` | host tensors and an interpreter for every supported ONNX op |
 | `exec/program.rs` | compile: constant folding, GELU fusion, weight pre-transpose, weight upload |
 | `exec/runtime.rs` | run: placement, uploads, flushes, readbacks |
+| `exec/sticky.rs` | graph inputs kept resident on the device between runs |
 | `exec/fold.rs` | logical shapes of any rank on 4-dimensional ggml tensors |
 | `exec/fusion.rs` | pattern fusions: GELU, decomposed LayerNorm |
 | `exec/ops_*.rs` | ONNX → ggml emitters |
@@ -36,6 +37,11 @@ Inside `onnxruntime-ggml`:
 ## Memory model
 
 The provider tells onnxruntime it lives on the CPU device. Inputs and outputs are host memory; the provider copies them into ggml buffers itself. This keeps the onnxruntime side trivial (no allocators, no data transfer, no streams) and makes CPU-provider fallback free of device copies. Weights are uploaded once at compile time and stay resident on the primary backend (Metal on macOS).
+
+Large float *graph inputs* can also stay resident between runs: `exec/sticky.rs`
+keeps one device buffer per input and re-uses it while a fingerprint of the host
+bytes is unchanged, which is what makes a decoder's constant cross-attention KV
+cache free after the first step (`sticky` option, `docs/OPTIONS.md`).
 
 ## Placement
 
@@ -74,6 +80,8 @@ and the node runs on the host, as before.
 
 ## Not yet
 
-- Attention fusion (`ggml_flash_attn_ext`), RoPE tables, KV cache kept on the device between runs.
+- Attention fusion (`ggml_flash_attn_ext`), RoPE tables.
+- Zero-copy graph inputs: onnxruntime's input buffers are copied into
+  `HostTensor`s before a run, which is ~6 ms per whisper decode step.
 - Quantized models (`DynamicQuantizeLinear` / `MatMulInteger` → ggml q8 matmul).
 - EPContext: caching the compiled program in the model file.
