@@ -1,0 +1,197 @@
+# onnxruntime-ggml tasks. Run `chore list` to see them.
+#
+# Nothing here compiles onnxruntime or ggml. The provider links prebuilt ggml
+# static libraries (libs/) and only needs onnxruntime's C headers (libs/ort/);
+# the onnxruntime wheel supplies the API table at load time.
+require 1.7.0
+
+include libs/libs.chore
+
+repo=thewh1teagle/onnxruntime-ggml
+lib_dir=python/onnxruntime_ggml/lib
+models_tag=models-v1
+model_name=pocket-tts-english-fp32.onnx
+
+# Print the platform id used in release asset names, e.g. darwin-arm64.
+task platform-id {
+    os=$OS
+    arch=$ARCH
+    if $OS == macos { os=darwin }
+    if $OS != macos && $ARCH == arm64 { arch=aarch64 }
+    if $OS == windows && $ARCH == x86_64 { arch=amd64 }
+    echo "$os-$arch"
+}
+
+# Print the provider library file name for this OS.
+task lib-name {
+    if $OS == macos { echo "libonnxruntime_ggml.dylib" }
+    else if $OS == windows { echo "onnxruntime_ggml.dll" }
+    else { echo "libonnxruntime_ggml.so" }
+}
+
+# Build the provider library in release mode.
+task build {
+    exists libs/lib || fetch-libs
+    cargo build --release -p onnxruntime-ggml
+    echo "built target/release/$(lib-name)"
+}
+
+# Build and copy the library into the Python package, for `uv run` from this checkout.
+task dev {
+    build
+    mkdir $lib_dir
+    copy target/release/$(lib-name) $lib_dir/$(lib-name)
+    echo "installed into $lib_dir; `uv run --with ./python python -m onnxruntime_ggml` to check"
+}
+
+# Run the Rust unit tests and the per-op Python tests.
+task test {
+    exists libs/lib || fetch-libs
+    cargo test --workspace
+    build
+    uv run tests/test_ops.py
+}
+
+# Run only the per-op Python tests: test-ops [filter].
+task test-ops filter= {
+    build
+    uv run tests/test_ops.py $1
+}
+
+# Fetch the pocket-tts fp32 model used by compare and the example.
+task model {
+    if exists models/$model_name {
+        echo "models/$model_name is already here"
+        return
+    }
+    mkdir models
+    download gh://$repo/$models_tag/$model_name models/$model_name --timeout 600
+}
+
+# Compare pocket-tts outputs between the CPU provider and ggml, then time both.
+task compare frames=12 {
+    model
+    build
+    uv run tests/compare_pocket_tts.py models/$model_name --frames $1
+}
+
+# Synthesise a line with pocket-tts on ggml: example [text...].
+task example {
+    model
+    build
+    uv run examples/pocket_tts.py $@
+}
+
+# Package the built library as a release archive: package-lib <version> [out].
+task package-lib version out=dist {
+    build
+    platform=$(platform-id)
+    stage=target/package/$platform
+    remove $stage
+    mkdir $stage
+    copy target/release/$(lib-name) $stage/$(lib-name)
+    copy LICENSE $stage/LICENSE
+    mkdir $2
+    archive $stage/ $2/onnxruntime-ggml-$1-$platform.tar.gz
+    echo "packaged $2/onnxruntime-ggml-$1-$platform.tar.gz"
+}
+
+# Set the version in Cargo.toml and python/pyproject.toml: set-version <version>.
+task set-version version {
+    script uv run --no-project python - {
+        import os, re, pathlib
+        v = os.environ["VERSION"]
+        for path, pattern in [
+            ("Cargo.toml", r'(?m)^(version = ")[^"]+(")'),
+            ("python/pyproject.toml", r'(?m)^(version = ")[^"]+(")'),
+            ("python/onnxruntime_ggml/__init__.py", r'(__version__ = ")[^"]+(")'),
+        ]:
+            p = pathlib.Path(path)
+            s, n = re.subn(pattern, lambda m: m.group(1) + v + m.group(2), p.read_text(), count=1)
+            assert n == 1, path
+            p.write_text(s)
+            print("set", path, "to", v)
+    }
+}
+
+# Tag and publish a GitHub release; CI builds every platform and attaches the libraries and wheels: release <version>.
+task release version {
+    which gh || fail "gh is not on PATH"
+    if "$(git status --porcelain)" != "" { fail "working tree has uncommitted changes" }
+    env VERSION $1
+    set-version $1
+    cargo update -w
+    git add Cargo.toml Cargo.lock python/pyproject.toml python/onnxruntime_ggml/__init__.py
+    try git commit -m "Release $1"
+    git tag v$1
+    git push origin HEAD --tags
+    gh release create v$1 --title "v$1" --generate-notes
+    echo "release v$1 created; the Release workflow uploads the libraries and wheels"
+}
+
+# Build one wheel per platform from the release archives: wheels <version> [out].
+task wheels version out=dist/wheels {
+    mkdir $2
+    for platform in darwin-arm64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-amd64 {
+        asset=onnxruntime-ggml-$1-$platform.tar.gz
+        if !exists dist/$asset {
+            mkdir dist
+            try download gh://$repo/v$1/$asset dist/$asset --timeout 300
+        }
+        if exists dist/$asset {
+            wheel-for $1 $platform dist/$asset $2
+        } else {
+            echo "no $asset on release v$1, skipping $platform"
+        }
+    }
+    echo "wheels in $2:"
+    for w in $(find $2 *.whl) { echo "  $w" }
+}
+
+# Build the wheel for one platform from a library archive: wheel-for <version> <platform> <archive> <out>.
+task wheel-for version platform archive out {
+    tag=""
+    if $2 == darwin-arm64 { tag=macosx_11_0_arm64 }
+    else if $2 == darwin-x86_64 { tag=macosx_10_15_x86_64 }
+    else if $2 == linux-x86_64 { tag=manylinux_2_28_x86_64 }
+    else if $2 == linux-aarch64 { tag=manylinux_2_28_aarch64 }
+    else if $2 == windows-amd64 { tag=win_amd64 }
+    else { fail "unknown platform $2" }
+    remove $lib_dir
+    mkdir $lib_dir
+    extract $3 $lib_dir --flatten
+    try remove $lib_dir/LICENSE
+    remove python/dist
+    uv build --wheel --directory python --out-dir dist
+    for w in $(find python/dist *.whl) {
+        uvx --from wheel wheel tags --python-tag py3 --abi-tag none --platform-tag $tag --remove $w
+    }
+    for w in $(find python/dist *.whl) { move $w $4/ }
+    remove $lib_dir
+    mkdir $lib_dir
+    write $lib_dir/.gitkeep ""
+    echo "built wheel for $2 ($tag)"
+}
+
+# Upload wheels to the GitHub release and PyPI: publish <version>.
+task publish version {
+    wheels $1
+    for w in $(find dist/wheels *.whl) { gh release upload v$1 $w --clobber }
+    uv publish dist/wheels/*.whl
+}
+
+# Format Rust and check Python.
+task format {
+    cargo fmt --all
+}
+
+# Lint the way CI does.
+task lint {
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+}
+
+# Delete build output.
+task clean {
+    remove target dist python/dist compare-cpu.wav compare-ggml.wav pocket-tts-ggml.wav
+}

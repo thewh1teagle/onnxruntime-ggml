@@ -1,0 +1,19 @@
+[package]
+name = "onnxruntime-ggml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "An onnxruntime execution provider that runs ONNX graphs on ggml (Metal, Vulkan, CPU)"
+
+[lib]
+name = "onnxruntime_ggml"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ggml-sys = { path = "../ggml-sys" }
+ort-ep-sys = { path = "../ort-ep-sys" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+half.workspace = true

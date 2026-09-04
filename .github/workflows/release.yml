@@ -1,0 +1,84 @@
+name: Release
+
+# `chore release <version>` tags v<version> and creates the GitHub release; this
+# workflow builds the provider library on every platform, attaches the
+# archives, then builds one wheel per platform and attaches those too.
+# Set the PYPI_API_TOKEN secret (or configure trusted publishing) to publish.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, e.g. 0.1.0 (release v<version> must exist)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  libs:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: darwin-arm64
+          - runner: macos-13
+            platform: darwin-x86_64
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+          - runner: ubuntu-22.04-arm
+            platform: linux-aarch64
+          - runner: windows-2022
+            platform: windows-amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - uses: getchore/setup-chore@v1
+      - name: Version
+        id: v
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then v="${{ github.event.inputs.version }}"; else v="${GITHUB_REF_NAME#v}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Fetch ggml libraries
+        run: chore fetch-libs
+      - name: Build and package
+        run: chore package-lib ${{ steps.v.outputs.version }}
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload v${{ steps.v.outputs.version }} dist/onnxruntime-ggml-${{ steps.v.outputs.version }}-${{ matrix.platform }}.tar.gz --clobber
+
+  wheels:
+    needs: libs
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: getchore/setup-chore@v1
+      - uses: astral-sh/setup-uv@v5
+      - name: Version
+        id: v
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then v="${{ github.event.inputs.version }}"; else v="${GITHUB_REF_NAME#v}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Build wheels from the release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: chore wheels ${{ steps.v.outputs.version }}
+      - name: Upload wheels to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: for w in dist/wheels/*.whl; do gh release upload v${{ steps.v.outputs.version }} "$w" --clobber; done
+      - name: Publish to PyPI
+        if: ${{ env.PYPI_API_TOKEN != '' }}
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: uv publish dist/wheels/*.whl

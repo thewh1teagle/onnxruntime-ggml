@@ -1,0 +1,14 @@
+/target
+/libs/lib
+/dist
+/models
+/python/onnxruntime_ggml/lib/*
+!/python/onnxruntime_ggml/lib/.gitkeep
+/python/dist
+/python/build
+*.onnx
+*.wav
+__pycache__/
+.venv/
+/plans
+.DS_Store

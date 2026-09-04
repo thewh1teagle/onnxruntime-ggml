@@ -1,0 +1,63 @@
+# The native inputs: ggml static libraries and headers, onnxruntime headers.
+# Included from the root chorefile, so $ROOT is the repository root.
+#
+# ggml is not built here. The static libraries come prebuilt from a GitHub
+# release (libs/libs-source names the repository and tag; today that is the
+# bundle vibe publishes for the same ggml tag). Bump libs/ggml-version and
+# libs/libs-source together, then `chore fetch-headers` and commit the headers.
+
+ggml_version=$(read $ROOT/libs/ggml-version)
+ort_version=$(read $ROOT/libs/ort-version)
+libs_repo=$(read $ROOT/libs/libs-repo)
+libs_tag=$(read $ROOT/libs/libs-tag)
+ggml_raw=https://raw.githubusercontent.com/ggml-org/ggml
+ort_raw=https://raw.githubusercontent.com/microsoft/onnxruntime
+
+# Print the platform id the ggml bundle uses, e.g. darwin-arm64 or windows-amd64-msvc.
+task libs-platform-id {
+    os=$OS
+    arch=$ARCH
+    if $OS == macos { os=darwin }
+    if $OS != macos && $ARCH == arm64 { arch=aarch64 }
+    if $OS == windows && $ARCH == x86_64 { arch=amd64 }
+    if $OS == windows { echo "$os-$arch-msvc" }
+    else { echo "$os-$arch" }
+}
+
+# Fetch the pinned ggml headers into libs/include.
+task fetch-headers {
+    out=$ROOT/libs/include
+    mkdir $out
+    for name in ggml.h ggml-cpu.h ggml-alloc.h ggml-backend.h gguf.h {
+        download $ggml_raw/$ggml_version/include/$name $out/$name --timeout 120
+        echo "wrote $name ($ggml_version)"
+    }
+    fetch-ort-headers
+}
+
+# Fetch the pinned onnxruntime C API headers into libs/ort/include.
+task fetch-ort-headers {
+    out=$ROOT/libs/ort/include
+    mkdir $out
+    for name in onnxruntime_c_api.h onnxruntime_ep_c_api.h onnxruntime_error_code.h onnxruntime_ep_device_ep_metadata_keys.h onnxruntime_session_options_config_keys.h {
+        download $ort_raw/$ort_version/include/onnxruntime/core/session/$name $out/$name --timeout 120
+        echo "wrote $name ($ort_version)"
+    }
+}
+
+# Download the prebuilt ggml static libraries for this platform into libs/lib.
+task fetch-libs {
+    platform=$(libs-platform-id)
+    echo "ggml: $ggml_version"
+    echo "platform: $platform"
+    echo "source: $libs_repo $libs_tag"
+    mkdir $ROOT/target
+    download gh://$libs_repo/$libs_tag/ggml-libs-$platform.tar.gz $ROOT/target/ggml-libs-$platform.tar.gz --timeout 300
+    remove $ROOT/target/ggml-libs
+    extract $ROOT/target/ggml-libs-$platform.tar.gz $ROOT/target/ggml-libs
+    remove $ROOT/libs/lib
+    move $ROOT/target/ggml-libs/lib $ROOT/libs/lib
+    remove $ROOT/target/ggml-libs
+    remove $ROOT/target/ggml-libs-$platform.tar.gz
+    echo "extracted to $ROOT/libs/lib"
+}

@@ -1,0 +1,11 @@
+[package]
+name = "ort-ep-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Raw bindings to the onnxruntime C API and plugin execution provider API, generated from libs/ort/include"
+build = "build.rs"
+
+[build-dependencies]
+bindgen.workspace = true
