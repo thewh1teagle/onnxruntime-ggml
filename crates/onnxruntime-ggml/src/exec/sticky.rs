@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet};
 use ggml_sys as g;
 
 use crate::error::{Error, Result};
-use crate::exec::backend::Backend;
 use crate::exec::ggml::{self, Ctx};
 use crate::exec::value::DeviceTensor;
 use crate::host::tensor::HostTensor;
@@ -87,13 +86,23 @@ impl Sticky {
 
     /// The resident tensor for `name`, or `None` when this input has proved to
     /// change from run to run and is better uploaded into the run's own graph.
-    pub fn get(&mut self, backend: &Backend, name: &str, t: &HostTensor) -> Result<Option<DeviceTensor>> {
+    /// # Safety
+    /// `backend` is a live ggml backend.
+    pub unsafe fn get(&mut self, backend: g::ggml_backend_t, name: &str, t: &HostTensor) -> Result<Option<DeviceTensor>> {
         let data = t.as_f32();
         self.get_raw(backend, name, &t.shape, &data)
     }
 
     /// Same, on a borrowed f32 slice (no copy on a hit).
-    pub fn get_raw(&mut self, backend: &Backend, name: &str, shape: &[usize], data: &[f32]) -> Result<Option<DeviceTensor>> {
+    /// # Safety
+    /// `backend` is a live ggml backend.
+    pub unsafe fn get_raw(
+        &mut self,
+        backend: g::ggml_backend_t,
+        name: &str,
+        shape: &[usize],
+        data: &[f32],
+    ) -> Result<Option<DeviceTensor>> {
         if self.volatile.contains(name) {
             return Ok(None);
         }
@@ -121,6 +130,7 @@ impl Sticky {
             // Changed after a run of hits (a new utterance, a new window): refresh in place.
             let hits = e.hits_since_change;
             if e.nbytes == nbytes && e.d.shape() == shape {
+                // SAFETY: `e.d.t` was allocated in `e.buffer`, which lives as long as the entry.
                 unsafe { g::ggml_backend_tensor_set(e.d.t, data.as_ptr().cast(), 0, nbytes) };
                 e.fp = fp;
                 e.hits_since_change = 0;
@@ -140,7 +150,7 @@ impl Sticky {
     }
 }
 
-unsafe fn alloc(backend: &Backend, name: &str, shape: &[usize], data: &[f32], fp: u64) -> Result<Entry> {
+unsafe fn alloc(backend: g::ggml_backend_t, name: &str, shape: &[usize], data: &[f32], fp: u64) -> Result<Entry> {
     let ctx = g::ggml_init(g::ggml_init_params {
         mem_size: g::ggml_tensor_overhead() * 2,
         mem_buffer: std::ptr::null_mut(),
@@ -157,7 +167,7 @@ unsafe fn alloc(backend: &Backend, name: &str, shape: &[usize], data: &[f32], fp
         }
     };
     ggml::set_name(d.t, &format!("sticky:{name}"));
-    let buffer = g::ggml_backend_alloc_ctx_tensors(ctx, backend.primary);
+    let buffer = g::ggml_backend_alloc_ctx_tensors(ctx, backend);
     if buffer.is_null() {
         g::ggml_free(ctx);
         return Err(Error::ggml("could not allocate a sticky input buffer"));

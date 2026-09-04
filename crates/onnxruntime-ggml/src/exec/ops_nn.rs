@@ -235,8 +235,13 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
             // kernel is a naive loop, ten times slower for mimi's layers.
             let full = (l - 1) * attrs.stride + k;
             let f = std::mem::size_of::<f32>();
-            let w2 = g::ggml_reshape_2d(ctx, contig(ctx, wk).t, (m * k) as i64, c as i64); // ne=[M*K, C]
-            let wt = g::ggml_cont(ctx, g::ggml_transpose(ctx, w2)); // ne=[C, M*K]
+            let wt = if node.attr_i("__w_prepacked", 0) != 0 {
+                // [M*K, C] constant prepacked at compile: ne=[C, M*K] resident, no per-run copy
+                run.dev_f32(need(node, ins, node.inputs.len() - 1)?)?.t
+            } else {
+                let w2 = g::ggml_reshape_2d(ctx, contig(ctx, wk).t, (m * k) as i64, c as i64); // ne=[M*K, C]
+                g::ggml_cont(ctx, g::ggml_transpose(ctx, w2)) // ne=[C, M*K]
+            };
             let x2 = g::ggml_reshape_2d(ctx, contig(ctx, xin).t, l as i64, c as i64); // ne=[L, C]
             let xt = g::ggml_cont(ctx, g::ggml_transpose(ctx, x2)); // ne=[C, L]
             let cols = g::ggml_mul_mat(ctx, wt, xt); // ne=[M*K, L]

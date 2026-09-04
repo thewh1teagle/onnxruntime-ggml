@@ -269,7 +269,7 @@ impl<'p> Run<'p> {
             let data = unsafe { std::slice::from_raw_parts(ptr as *const f32, nbytes / 4) };
             let mut sticky = self.prog.sticky.lock().map_err(|_| Error::internal("sticky cache poisoned"))?;
             let before = sticky.stats.hits;
-            let d = sticky.get_raw(&self.prog.backend, name, shape, data)?;
+            let d = unsafe { sticky.get_raw(self.prog.device, name, shape, data)? };
             match (d, sticky.stats.hits > before) {
                 (Some(d), true) => {
                     self.stats.sticky_hits += 1;
@@ -321,7 +321,7 @@ impl<'p> Run<'p> {
         }
         let mut sticky = self.prog.sticky.lock().map_err(|_| Error::internal("sticky cache poisoned"))?;
         let before = sticky.stats.hits;
-        let d = sticky.get(&self.prog.backend, name, t)?;
+        let d = unsafe { sticky.get(self.prog.device, name, t)? };
         match (d, sticky.stats.hits > before) {
             (Some(d), true) => {
                 self.stats.sticky_hits += 1;

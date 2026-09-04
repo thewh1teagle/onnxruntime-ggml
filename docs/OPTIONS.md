@@ -17,6 +17,9 @@ onnxruntime stores them as session config entries `ep.ggml.<key>`, which is also
 | `partial` | `0`, `1` | `0` | claim supported nodes even when some ops are unsupported (copies at every boundary) |
 | `dump` | `0`, `1` | `0` | log every intermediate value at trace level |
 | `attention` | `auto`, `matmul`, `flash`, `flash-f32` | `auto` | exported attention is fused into one node; `auto` runs flash attention (f32 K/V) when the query has 32+ positions and a three-kernel matmul path otherwise |
+| `gpu_min_weight_mb` | int | `256` | programs with fewer resident weight bytes run on ggml's CPU backend even when a GPU exists: small models are launch-bound and measured faster there (pocket-tts 194 MiB: CPU; whisper decoders 430 MiB: Metal) |
+| `conv_transpose_matmul` | `0`, `1` | `1` | ConvTranspose as one matmul plus strided accumulates instead of ggml's kernel |
+| `profile` | `0`, `1` | `0` | time every ggml kernel through the scheduler callback and log a per-op summary (serialises the graph) |
 | `accel` | `0`, `1` | `0` | add ggml's ACCEL backends (BLAS on macOS) to the scheduler |
 | `weights` | `f32`, `f16`, `q8_0` | `f16` | storage type of the resident 2-D matmul weights; `q8_0` halves the bytes again for decode-bound models |
 | `sticky` | `0`, `1` | `1` | keep large unchanged float graph inputs resident on the device between runs |

@@ -75,6 +75,11 @@ pub struct Program {
     pub name: String,
     pub graph: Graph,
     pub backend: Arc<Backend>,
+    /// Where this program's weights and resident inputs live: the GPU for
+    /// models above `gpu_min_weight_bytes`, else the CPU backend (small
+    /// models are dispatch-bound and run faster there).
+    pub device: g::ggml_backend_t,
+    pub device_name: String,
     pub weights: Weights,
     pub last_use: HashMap<String, usize>,
     pub stats: CompileStats,
@@ -83,6 +88,10 @@ pub struct Program {
     /// Graph inputs kept resident on the device across runs (`sticky` option).
     pub sticky: Mutex<Sticky>,
 }
+
+// `device` is a ggml backend handle owned by `backend`, which is already Send + Sync.
+unsafe impl Send for Program {}
+unsafe impl Sync for Program {}
 
 impl Program {
     pub fn compile(name: &str, mut graph: Graph, backend: Arc<Backend>) -> Result<Program> {
@@ -114,7 +123,14 @@ impl Program {
         stats.constants = graph.constants.len();
         stats.nodes_out = graph.nodes.len();
 
-        let weights = upload_weights(&graph, &backend)?;
+        let total_weight_bytes: usize = graph.constants.values().filter(|t| t.dtype().is_float()).map(|t| t.numel() * 2).sum();
+        let (device, device_name) = if backend.gpu && total_weight_bytes >= backend.options.gpu_min_weight_bytes {
+            (backend.primary, backend.primary_name.clone())
+        } else {
+            (backend.cpu(), "CPU".to_owned())
+        };
+        tracing::info!(device = %device_name, approx_weight_bytes = %bytes(total_weight_bytes), gpu_min = %bytes(backend.options.gpu_min_weight_bytes), "program device");
+        let weights = upload_weights(&graph, &backend, device)?;
         stats.weights_uploaded = weights.tensors.len();
         stats.weight_bytes = weights.nbytes;
         stats.weights_f16 = weights.n_f16;
@@ -145,6 +161,8 @@ impl Program {
             name: name.to_owned(),
             graph,
             backend,
+            device,
+            device_name,
             weights,
             last_use,
             stats,
@@ -211,6 +229,23 @@ pub fn pretranspose_weights(graph: &mut Graph) -> Result<usize> {
                         }
                         node.inputs[1] = tname;
                         node.set_attr_i("__b_transposed", 1);
+                        n += 1;
+                    }
+                }
+            }
+            "ConvTranspose" => {
+                let w = node.inputs[1].clone();
+                if let Some(t) = graph.constants.get(&w) {
+                    if t.rank() == 3 && node.attr_i("group", 1) == 1 {
+                        // [C, M, K] -> [M*K, C]: what the matmul path's ggml_mul_mat wants as src0
+                        let tname = format!("{w}__ct");
+                        if !graph.constants.contains_key(&tname) && !new_consts.iter().any(|(k, _)| k == &tname) {
+                            let (c, m, k) = (t.shape[0], t.shape[1], t.shape[2]);
+                            let flat = t.reshaped(vec![c, m * k])?;
+                            new_consts.push((tname.clone(), transpose(&flat, &[1, 0])?));
+                        }
+                        node.inputs.push(tname);
+                        node.set_attr_i("__w_prepacked", 1);
                         n += 1;
                     }
                 }
@@ -296,7 +331,7 @@ fn mul_mat_weights(graph: &Graph) -> HashSet<String> {
 /// With `weights=f16` the 2-D matmul weights are stored as F16: `ggml_mul_mat`
 /// takes an F16 src0 against an F32 src1 on both Metal and CPU, which halves
 /// the bytes read per matmul. Vectors (biases, norm scales) stay F32.
-fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
+fn upload_weights(graph: &Graph, backend: &Backend, device: g::ggml_backend_t) -> Result<Weights> {
     let candidates: Vec<(&String, &Arc<HostTensor>)> =
         graph.constants.iter().filter(|(_, t)| t.dtype().is_float() && t.rank() <= ggml::MAX_RANK && t.numel() > 0).collect();
     let half = match backend.options.weights {
@@ -329,7 +364,7 @@ fn upload_weights(graph: &Graph, backend: &Backend) -> Result<Weights> {
         let buffer = if candidates.is_empty() {
             std::ptr::null_mut()
         } else {
-            let b = g::ggml_backend_alloc_ctx_tensors(ctx, backend.primary);
+            let b = g::ggml_backend_alloc_ctx_tensors(ctx, device);
             if b.is_null() {
                 g::ggml_free(ctx);
                 return Err(Error::ggml("could not allocate the weight buffer on the primary backend"));

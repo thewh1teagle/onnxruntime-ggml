@@ -65,6 +65,8 @@ pub struct Options {
     pub conv_transpose_cpu: bool,
     /// ConvTranspose as a matmul plus strided accumulates instead of ggml's kernel.
     pub conv_transpose_matmul: bool,
+    /// Programs with fewer resident weight bytes than this run on the CPU backend even when a GPU exists.
+    pub gpu_min_weight_bytes: usize,
     /// Add the ACCEL backends (BLAS on macOS) to the scheduler. They only take
     /// matmuls, and the split costs more than they save on this workload.
     pub accel: bool,
@@ -87,6 +89,7 @@ impl Default for Options {
             profile: false,
             conv_transpose_cpu: false,
             conv_transpose_matmul: true,
+            gpu_min_weight_bytes: 256 << 20,
             accel: false,
             weights: WeightPrecision::F16,
             sticky: true,
@@ -111,6 +114,7 @@ impl Options {
         o.apply("profile", std::env::var("ORT_GGML_PROFILE").ok().as_deref());
         o.apply("conv_transpose_cpu", std::env::var("ORT_GGML_CONV_TRANSPOSE_CPU").ok().as_deref());
         o.apply("conv_transpose_matmul", std::env::var("ORT_GGML_CONV_TRANSPOSE_MATMUL").ok().as_deref());
+        o.apply("gpu_min_weight_mb", std::env::var("ORT_GGML_GPU_MIN_WEIGHT_MB").ok().as_deref());
         o.apply("attention", std::env::var("ORT_GGML_ATTENTION").ok().as_deref());
         o.apply("accel", std::env::var("ORT_GGML_ACCEL").ok().as_deref());
         o.apply("weights", std::env::var("ORT_GGML_WEIGHTS").ok().as_deref());
@@ -125,7 +129,10 @@ impl Options {
         match key {
             "device" => {
                 self.device = match v.as_str() {
-                    "gpu" | "metal" | "vulkan" => Device::Gpu,
+                    "gpu" | "metal" | "vulkan" => {
+                        self.gpu_min_weight_bytes = 0;
+                        Device::Gpu
+                    }
                     "cpu" => Device::Cpu,
                     "auto" | "" => Device::Auto,
                     other => {
@@ -143,6 +150,10 @@ impl Options {
             "profile" => self.profile = matches!(v.as_str(), "1" | "true" | "yes"),
             "conv_transpose_cpu" => self.conv_transpose_cpu = matches!(v.as_str(), "1" | "true" | "yes"),
             "conv_transpose_matmul" => self.conv_transpose_matmul = matches!(v.as_str(), "1" | "true" | "yes"),
+            "gpu_min_weight_mb" => match v.parse::<usize>() {
+                Ok(n) => self.gpu_min_weight_bytes = n << 20,
+                _ => tracing::warn!(value = %v, "bad gpu_min_weight_mb option"),
+            },
             "attention" => {
                 self.attention = match v.as_str() {
                     "auto" | "" => Attention::Auto,
