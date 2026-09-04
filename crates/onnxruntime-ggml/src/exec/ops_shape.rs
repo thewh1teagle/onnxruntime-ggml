@@ -4,7 +4,8 @@
 use ggml_sys as g;
 
 use crate::error::{Error, Result};
-use crate::exec::ggml::{self, contig, dev, gaxis};
+use crate::exec::fold;
+use crate::exec::ggml::{self, contig, dev, gaxis, MAX_RANK};
 use crate::exec::runtime::{In, Run};
 use crate::exec::value::{DeviceTensor, Value};
 use crate::host::broadcast::broadcast_shapes;
@@ -27,7 +28,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
             let x = run.dev_f32(need(node, ins, 0)?)?;
             let shape = run.host_param(need(node, ins, 1)?, "reshape shape")?.as_i64().to_vec();
             let target = resolve_reshape(&x.shape(), &shape, node.attr_i("allowzero", 0) != 0)?;
-            vec![unsafe { ggml::reshape(run.ctx, x, &target)? }]
+            vec![unsafe { fold::reshape_logical(run.ctx, x, &target)? }]
         }
         "Unsqueeze" => {
             let x = run.dev_f32(need(node, ins, 0)?)?;
@@ -36,7 +37,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
                 None => node.attr_ints("axes").ok_or_else(|| Error::model("Unsqueeze without axes"))?,
             };
             let target = unsqueeze_shape(&x.shape(), &axes)?;
-            vec![unsafe { ggml::reshape(run.ctx, x, &target)? }]
+            vec![unsafe { fold::reshape_logical(run.ctx, x, &target)? }]
         }
         "Squeeze" => {
             let x = run.dev_f32(need(node, ins, 0)?)?;
@@ -45,7 +46,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
                 None => node.attr_ints("axes"),
             };
             let target = squeeze_shape(&x.shape(), axes.as_deref())?;
-            vec![unsafe { ggml::reshape(run.ctx, x, &target)? }]
+            vec![unsafe { fold::reshape_logical(run.ctx, x, &target)? }]
         }
         "Transpose" => {
             let x = run.dev_f32(need(node, ins, 0)?)?;
@@ -53,7 +54,11 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
                 Some(p) => p.iter().map(|&a| norm_axis(a, x.rank)).collect::<Result<_>>()?,
                 None => (0..x.rank).rev().collect(),
             };
-            vec![unsafe { ggml::permute(run.ctx, x, &perm)? }]
+            if x.rank > MAX_RANK {
+                vec![unsafe { fold::permute_logical(run.ctx, x, &perm)? }]
+            } else {
+                vec![unsafe { ggml::permute(run.ctx, x, &perm)? }]
+            }
         }
         "Slice" => {
             let x = run.dev_f32(need(node, ins, 0)?)?;
@@ -74,7 +79,11 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
             if plan.count.contains(&0) {
                 return Err(Error::unsupported("empty slice"));
             }
-            vec![unsafe { ggml::view_slice(run.ctx, x, &plan.start, &plan.count)? }]
+            if x.rank > MAX_RANK {
+                vec![unsafe { slice_axes(run, x, &plan.start, &plan.count)? }]
+            } else {
+                vec![unsafe { ggml::view_slice(run.ctx, x, &plan.start, &plan.count)? }]
+            }
         }
         "Concat" => {
             let present: Vec<&In> = ins.iter().flatten().collect();
@@ -92,6 +101,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
                 let d = unsafe { contig(run.ctx, d) };
                 acc = Some(match acc {
                     None => d,
+                    Some(a) if rank > MAX_RANK => unsafe { fold::concat_axis(run.ctx, a, d, axis)? },
                     Some(a) => {
                         let mut shape = a.shape();
                         shape[axis] += d.shape[axis];
@@ -130,7 +140,11 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
             for &size in &sizes {
                 let mut count = x.shape();
                 count[axis] = size;
-                outs.push(unsafe { ggml::view_slice(run.ctx, x, &start, &count)? });
+                outs.push(if x.rank > MAX_RANK {
+                    unsafe { fold::view_axis(run.ctx, x, axis, start[axis], size)? }
+                } else {
+                    unsafe { ggml::view_slice(run.ctx, x, &start, &count)? }
+                });
                 start[axis] += size;
             }
             outs
@@ -167,6 +181,20 @@ impl ValueExt for Value {
     }
 }
 
+/// A slice of a rank > 4 tensor, one logical axis at a time. Each axis that
+/// actually narrows costs a view (and a `cont` before the next one); in
+/// practice the KV-cache slices touch a single axis.
+unsafe fn slice_axes(run: &mut Run, x: DeviceTensor, start: &[usize], count: &[usize]) -> Result<DeviceTensor> {
+    let mut cur = x;
+    for axis in 0..x.rank {
+        if start[axis] == 0 && count[axis] == cur.shape[axis] {
+            continue;
+        }
+        cur = fold::view_axis(run.ctx, cur, axis, start[axis], count[axis])?;
+    }
+    Ok(cur)
+}
+
 /// Two Gather shapes ggml can serve: a single index (a strided view) and
 /// row lookup on a 2-D table (`ggml_get_rows`). Anything else is declined and
 /// the runtime evaluates it on the host.
@@ -181,15 +209,19 @@ fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor,
         if k < 0 || k >= dim {
             return Err(Error::shape(format!("gather index {k} out of range {dim}")));
         }
-        let mut start = vec![0usize; x.rank];
-        let mut count = x.shape();
-        start[axis] = k as usize;
-        count[axis] = 1;
-        let v = unsafe { ggml::view_slice(ctx, x, &start, &count)? };
+        let v = if x.rank > MAX_RANK {
+            unsafe { fold::view_axis(ctx, x, axis, k as usize, 1)? }
+        } else {
+            let mut start = vec![0usize; x.rank];
+            let mut count = x.shape();
+            start[axis] = k as usize;
+            count[axis] = 1;
+            unsafe { ggml::view_slice(ctx, x, &start, &count)? }
+        };
         if idx.rank() == 0 {
             let mut shape = x.shape();
             shape.remove(axis);
-            return unsafe { ggml::reshape(ctx, v, &shape) };
+            return unsafe { fold::reshape_logical(ctx, v, &shape) };
         }
         return Ok(v);
     }
@@ -206,7 +238,7 @@ fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor,
         let t = unsafe { g::ggml_get_rows(ctx, x.t, id.t) };
         let mut shape = idx.shape.clone();
         shape.push(cols);
-        return unsafe { ggml::reshape(ctx, dev(t, &[ids.len(), cols]), &shape) };
+        return unsafe { fold::reshape_logical(ctx, dev(t, &[ids.len(), cols]), &shape) };
     }
     let _ = DType::I32;
     Err(Error::unsupported(format!("gather axis {axis} on rank {} with {} indices", x.rank, idx.numel())))

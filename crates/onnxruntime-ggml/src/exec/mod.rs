@@ -1,6 +1,7 @@
 //! The compiler and executor.
 //!
 //! - `backend` : ggml backends (Metal/Vulkan + CPU) and a scheduler
+//! - `fold`    : logical shapes of any rank on 4-dimensional ggml tensors
 //! - `ggml`    : safe helpers over ggml tensors (shape convention, views, cont)
 //! - `program` : compile an `ir::Graph`: fold constants, rewrite patterns,
 //!               upload weights once
@@ -10,6 +11,7 @@
 //! - `value`   : what a runtime value is (host, staged-for-device, or device)
 
 pub mod backend;
+pub mod fold;
 pub mod ggml;
 pub mod ops_binary;
 pub mod ops_nn;

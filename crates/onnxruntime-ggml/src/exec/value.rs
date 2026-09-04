@@ -8,14 +8,21 @@ use ggml_sys::ggml_tensor;
 use crate::host::tensor::HostTensor;
 use crate::ir::DType;
 
+/// The highest ONNX rank a device tensor can carry as a logical shape. ggml
+/// tensors have four dimensions; anything above that is a *folding* of the
+/// logical shape (see `exec::fold`), so the logical shape has to be carried
+/// here in full.
+pub const MAX_LOGICAL_RANK: usize = 8;
+
 /// A tensor that exists inside the current ggml graph. `shape` is the ONNX
-/// (row-major) shape; ggml's `ne` is its reverse padded with 1s, so the
-/// original rank has to be carried separately.
+/// (row-major) *logical* shape; the ggml tensor holds its elements in exactly
+/// that row-major order, with `ne` either the reverse of the shape padded with
+/// 1s (rank <= 4) or the reverse of a folding of it (rank > 4).
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceTensor {
     pub t: *mut ggml_tensor,
     pub rank: usize,
-    pub shape: [usize; 4],
+    pub shape: [usize; MAX_LOGICAL_RANK],
 }
 
 impl DeviceTensor {

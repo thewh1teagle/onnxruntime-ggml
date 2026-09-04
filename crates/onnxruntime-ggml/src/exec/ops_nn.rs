@@ -149,12 +149,23 @@ fn conv(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> 
     }
     let ctx = run.ctx;
     unsafe {
-        let mut xin = contig(ctx, x);
+        // Restate both operands at their exact 3-D `ne`: a leaf's ggml shape is a
+        // *folding* of its ONNX shape, which drops size-1 dims, and im2col reads
+        // ne[0..2] as (L, C) on the input and (K, C) on the kernel.
+        let mut xin = ggml::reshape(ctx, x, &[n, c, l])?;
         if attrs.pad_left > 0 || attrs.pad_right > 0 {
             let t = g::ggml_pad_ext(ctx, xin.t, attrs.pad_left as i32, attrs.pad_right as i32, 0, 0, 0, 0, 0, 0);
             xin = dev(t, &[n, c, l + attrs.pad_left + attrs.pad_right]);
         }
-        let wk = contig(ctx, w);
+        let wk = ggml::reshape(ctx, w, &[m, cw, k])?;
+        tracing::trace!(
+            node = %node,
+            input = %ggml::describe(&x),
+            padded = %ggml::describe(&xin),
+            weight = %ggml::describe(&wk),
+            pads = ?[attrs.pad_left, attrs.pad_right],
+            "conv im2col"
+        );
         let span = attrs.dilation * (k - 1) + 1;
         let l_out = (xin.shape[2]).saturating_sub(span) / attrs.stride + 1;
         // im2col: ne = [C*K, L_out, N]
@@ -206,8 +217,17 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
     }
     let ctx = run.ctx;
     unsafe {
-        let xin = contig(ctx, x);
-        let wk = contig(ctx, w);
+        // See `conv`: the leaf `ne` is a folding, ggml_conv_transpose_1d is not.
+        let xin = ggml::reshape(ctx, x, &[n, c, l])?;
+        let wk = ggml::reshape(ctx, w, &[cw, m, k])?;
+        tracing::trace!(
+            node = %node,
+            input = %ggml::describe(&x),
+            packed = %ggml::describe(&xin),
+            weight = %ggml::describe(&wk),
+            pads = ?[attrs.pad_left, attrs.pad_right],
+            "conv_transpose"
+        );
         let t = g::ggml_conv_transpose_1d(ctx, wk.t, xin.t, attrs.stride as i32, 0, 1);
         let full = (l - 1) * attrs.stride + k;
         let mut y = dev(t, &[n, m, full]);

@@ -32,11 +32,14 @@ pub struct Options {
     pub partial: bool,
     /// Log every value at trace level, including data heads. Slow.
     pub dump: bool,
+    /// Add the ACCEL backends (BLAS on macOS) to the scheduler. They only take
+    /// matmuls, and the split costs more than they save on this workload.
+    pub accel: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { device: Device::Auto, threads: default_threads(), partial: false, dump: false }
+        Options { device: Device::Auto, threads: default_threads(), partial: false, dump: false, accel: false }
     }
 }
 
@@ -46,13 +49,14 @@ fn default_threads() -> i32 {
 }
 
 impl Options {
-    /// Environment overrides: ORT_GGML_DEVICE, ORT_GGML_THREADS, ORT_GGML_PARTIAL, ORT_GGML_DUMP.
+    /// Environment overrides: ORT_GGML_DEVICE, ORT_GGML_THREADS, ORT_GGML_PARTIAL, ORT_GGML_DUMP, ORT_GGML_ACCEL.
     pub fn from_env() -> Options {
         let mut o = Options::default();
         o.apply("device", std::env::var("ORT_GGML_DEVICE").ok().as_deref());
         o.apply("threads", std::env::var("ORT_GGML_THREADS").ok().as_deref());
         o.apply("partial", std::env::var("ORT_GGML_PARTIAL").ok().as_deref());
         o.apply("dump", std::env::var("ORT_GGML_DUMP").ok().as_deref());
+        o.apply("accel", std::env::var("ORT_GGML_ACCEL").ok().as_deref());
         o
     }
 
@@ -78,6 +82,7 @@ impl Options {
             },
             "partial" => self.partial = matches!(v.as_str(), "1" | "true" | "yes"),
             "dump" => self.dump = matches!(v.as_str(), "1" | "true" | "yes"),
+            "accel" => self.accel = matches!(v.as_str(), "1" | "true" | "yes"),
             other => tracing::warn!(key = other, "unknown option"),
         }
     }
@@ -167,7 +172,7 @@ impl Backend {
                 }
             }
             // ACCEL devices (BLAS on macOS) sit between the GPU and the CPU.
-            for &(dev, ty) in &list {
+            for &(dev, ty) in list.iter().filter(|_| options.accel) {
                 if ty == g::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_ACCEL {
                     let b = g::ggml_backend_dev_init(dev, std::ptr::null());
                     if !b.is_null() {

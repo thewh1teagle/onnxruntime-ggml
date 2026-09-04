@@ -16,6 +16,7 @@ onnxruntime stores them as session config entries `ep.ggml.<key>`, which is also
 | `threads` | int | half the cores, max 8 | ggml CPU backend threads |
 | `partial` | `0`, `1` | `0` | claim supported nodes even when some ops are unsupported (copies at every boundary) |
 | `dump` | `0`, `1` | `0` | log every intermediate value at trace level |
+| `accel` | `0`, `1` | `0` | add ggml's ACCEL backends (BLAS on macOS) to the scheduler |
 
 ## Environment
 
@@ -23,7 +24,7 @@ Lower precedence than session options.
 
 | variable | meaning |
 |---|---|
-| `ORT_GGML_DEVICE`, `ORT_GGML_THREADS`, `ORT_GGML_PARTIAL`, `ORT_GGML_DUMP` | the options above |
+| `ORT_GGML_DEVICE`, `ORT_GGML_THREADS`, `ORT_GGML_PARTIAL`, `ORT_GGML_DUMP`, `ORT_GGML_ACCEL` | the options above |
 | `ORT_GGML_LOG` | tracing filter: `info` (default), `debug`, `trace`, or a full `EnvFilter` directive |
 | `ORT_GGML_CPU_VARIANT` | x86_64 only: `avx2` or `baseline` to override CPU feature detection |
 | `ONNXRUNTIME_GGML_LIBRARY` | path of the provider library, instead of the one bundled in the wheel |

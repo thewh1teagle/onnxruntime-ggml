@@ -7,8 +7,9 @@
 //! every crossing is logged.
 //!
 //! Placement rule, per node:
-//! - forced host: shape-only ops, comparisons, int casts, rank > 4, ops
-//!   without a ggml emitter
+//! - forced host: shape-only ops, comparisons, int casts, ops without a ggml
+//!   emitter, and rank > 4 for every op whose emitter is not rank-agnostic
+//!   (`RANK_ANY_OPS`)
 //! - all inputs `Host` (not `Staged`): host
 //! - otherwise device; if the emitter declines (`Unsupported`), host
 
@@ -90,6 +91,13 @@ pub const DEVICE_OPS: &[&str] = &[
     "ConvTranspose",
 ];
 
+/// Ops whose ggml emitter carries a logical ONNX shape of any rank (see
+/// `exec::fold`): they fold it into ggml's four dims, or decline. For every
+/// other op a rank > 4 input is still a host decision, because its emitter
+/// reads `ne` positionally.
+pub const RANK_ANY_OPS: &[&str] =
+    &["Reshape", "Unsqueeze", "Squeeze", "Transpose", "Slice", "Concat", "Gather", "Split", "Identity"];
+
 pub fn device_capable(op: &str) -> bool {
     DEVICE_OPS.contains(&op)
 }
@@ -128,6 +136,9 @@ pub struct Run<'p> {
     graph: *mut g::ggml_cgraph,
     values: HashMap<String, Value>,
     uploads: Vec<Upload>,
+    /// Named values already uploaded into the current graph, so that a KV cache
+    /// read by twenty Gathers crosses the boundary once. Cleared by every flush.
+    uploaded: HashMap<String, DeviceTensor>,
     pub stats: RunStats,
     node_index: usize,
 }
@@ -159,7 +170,16 @@ unsafe fn new_graph_ctx() -> Result<(Ctx, *mut g::ggml_cgraph)> {
 impl<'p> Run<'p> {
     pub fn new(prog: &'p Program) -> Result<Run<'p>> {
         let (ctx, graph) = unsafe { new_graph_ctx()? };
-        Ok(Run { prog, ctx, graph, values: HashMap::new(), uploads: Vec::new(), stats: RunStats::default(), node_index: 0 })
+        Ok(Run {
+            prog,
+            ctx,
+            graph,
+            values: HashMap::new(),
+            uploads: Vec::new(),
+            uploaded: HashMap::new(),
+            stats: RunStats::default(),
+            node_index: 0,
+        })
     }
 
     // ------------------------------------------------------------ lookups
@@ -198,6 +218,7 @@ impl<'p> Run<'p> {
     }
 
     /// The device tensor for an input: as is, a resident weight, or an upload.
+    /// Repeated reads of the same graph value share one upload.
     pub fn dev(&mut self, i: &In) -> Result<DeviceTensor> {
         match &i.v {
             Value::Device(d) => Ok(*d),
@@ -205,10 +226,20 @@ impl<'p> Run<'p> {
                 if let Some(w) = self.weight(&i.name) {
                     return Ok(w);
                 }
+                if let Some(d) = self.cached(&i.name, false) {
+                    return Ok(d);
+                }
                 let t = t.clone();
-                self.upload(&t, &i.name)
+                let d = self.upload(&t, &i.name)?;
+                self.uploaded.insert(format!("{}#raw", i.name), d);
+                Ok(d)
             }
         }
+    }
+
+    /// An upload of this value already in the current graph, if there is one.
+    fn cached(&self, name: &str, f32: bool) -> Option<DeviceTensor> {
+        self.uploaded.get(&format!("{name}#{}", if f32 { "f32" } else { "raw" })).copied()
     }
 
     /// Like `dev`, but any integer or bool data is widened to f32 first.
@@ -219,8 +250,13 @@ impl<'p> Run<'p> {
                 if let Some(w) = self.weight(&i.name) {
                     return Ok(w);
                 }
+                if let Some(d) = self.cached(&i.name, true) {
+                    return Ok(d);
+                }
                 let t = if t.dtype() == DType::F32 { t.clone() } else { Arc::new(t.cast(DType::F32)) };
-                self.upload(&t, &i.name)
+                let d = self.upload(&t, &i.name)?;
+                self.uploaded.insert(format!("{}#f32", i.name), d);
+                Ok(d)
             }
         }
     }
@@ -294,6 +330,7 @@ impl<'p> Run<'p> {
             self.ctx = ctx;
             self.graph = graph;
             self.uploads.clear();
+            self.uploaded.clear();
             self.stats.flushes += 1;
             self.stats.readbacks += outs.len();
             self.stats.readback_bytes += read_bytes;
@@ -476,6 +513,13 @@ impl<'p> Run<'p> {
         }
         if op == "Cast" && !DType::from_onnx(node.attr_i("to", 1) as i32).map(|d| d.is_float()).unwrap_or(false) {
             return true;
+        }
+        if ins.iter().flatten().any(|i| i.v.rank() > crate::exec::value::MAX_LOGICAL_RANK) {
+            return true;
+        }
+        if RANK_ANY_OPS.contains(&op) {
+            // the emitter folds the logical shape, or declines and lands here anyway
+            return false;
         }
         if ins.iter().flatten().any(|i| i.v.rank() > ggml::MAX_RANK) {
             return true;

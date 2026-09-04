@@ -8,7 +8,7 @@ use std::ffi::CString;
 use ggml_sys as g;
 
 use crate::error::{Error, Result};
-use crate::exec::value::DeviceTensor;
+use crate::exec::value::{DeviceTensor, MAX_LOGICAL_RANK};
 use crate::ir::DType;
 
 pub type Ctx = *mut g::ggml_context;
@@ -27,9 +27,10 @@ pub fn ne_of(shape: &[usize]) -> Result<[i64; 4]> {
     Ok(ne)
 }
 
-pub fn shape_arr(shape: &[usize]) -> [usize; 4] {
-    let mut s = [1usize; 4];
-    s[..shape.len()].copy_from_slice(shape);
+pub fn shape_arr(shape: &[usize]) -> [usize; MAX_LOGICAL_RANK] {
+    let mut s = [1usize; MAX_LOGICAL_RANK];
+    let n = shape.len().min(MAX_LOGICAL_RANK);
+    s[..n].copy_from_slice(&shape[..n]);
     s
 }
 
@@ -51,12 +52,20 @@ pub fn dev(t: T, shape: &[usize]) -> DeviceTensor {
     DeviceTensor { t, rank: shape.len(), shape: shape_arr(shape) }
 }
 
+/// Allocate a leaf whose logical shape may have any rank: the ggml tensor gets
+/// the folded shape, the `DeviceTensor` keeps the logical one.
 pub unsafe fn new_tensor(ctx: Ctx, dtype: DType, shape: &[usize]) -> Result<DeviceTensor> {
-    let ne = ne_of(shape)?;
-    let n_dims = shape.len().clamp(1, 4) as i32;
+    // Below the ggml rank limit the ne stays the exact reverse-padded shape;
+    // only above it does the logical shape fold.
+    let folded = if shape.len() <= MAX_RANK { shape.to_vec() } else { crate::exec::fold::fold4(shape)? };
+    let ne = ne_of(&folded)?;
+    let n_dims = folded.len().clamp(1, 4) as i32;
     let t = g::ggml_new_tensor(ctx, gtype(dtype)?, n_dims, ne.as_ptr());
     if t.is_null() {
         return Err(Error::ggml("ggml_new_tensor returned null (context out of memory?)"));
+    }
+    if shape.len() > MAX_RANK {
+        tracing::trace!(onnx = ?shape, ne = ?&ne[..n_dims as usize], "rank > 4 leaf, folded");
     }
     Ok(dev(t, shape))
 }
@@ -69,12 +78,21 @@ pub unsafe fn set_name(t: T, name: &str) {
 }
 
 pub unsafe fn is_contiguous(t: T) -> bool {
-    g::ggml_is_contiguous(t)
+    g::ggml_is_contiguous(t) && rows_dense(t)
+}
+
+/// Is the innermost dimension packed? `ggml_is_contiguous` skips the `nb[0]`
+/// check when `ne[0]` is one block (always the case for `ne[0] == 1` with an
+/// f32 tensor), so a permuted view of shape `[.., 1]` passes it while keeping a
+/// strided `nb[0]`. CPU kernels that assert `nb00 == sizeof(float)` (im2col,
+/// mul_mat) then abort, while Metal happily reads the strides.
+pub unsafe fn rows_dense(t: T) -> bool {
+    (*t).nb[0] == g::ggml_type_size((*t).type_)
 }
 
 /// A contiguous copy when the tensor is a strided view, else the tensor itself.
 pub unsafe fn contig(ctx: Ctx, d: DeviceTensor) -> DeviceTensor {
-    if g::ggml_is_contiguous(d.t) {
+    if g::ggml_is_contiguous(d.t) && rows_dense(d.t) {
         d
     } else {
         DeviceTensor { t: g::ggml_cont(ctx, d.t), ..d }
@@ -163,7 +181,13 @@ pub fn describe(d: &DeviceTensor) -> String {
     unsafe {
         let ne = ne(d.t);
         let name = std::ffi::CStr::from_ptr(g::ggml_get_name(d.t)).to_string_lossy();
-        format!("{name}: onnx{:?} ne{:?} contiguous={}", d.shape(), &ne[..d.rank.max(1)], g::ggml_is_contiguous(d.t))
+        format!(
+            "{name}: onnx{:?} ne{:?} nb0={} contiguous={}",
+            d.shape(),
+            &ne[..d.rank.clamp(1, MAX_RANK)],
+            (*d.t).nb[0],
+            is_contiguous(d.t)
+        )
     }
 }
 

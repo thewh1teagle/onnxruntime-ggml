@@ -49,7 +49,7 @@ session = ort.InferenceSession("model.onnx", so)
 
 ## Status
 
-Targets [pocket-tts](https://github.com/thewh1teagle/pocket-tts-onnx) today: 38 ONNX op types, opset 17, fp32. Quantized (`MatMulInteger`) models and further models come next. `chore compare` checks every output against onnxruntime's CPU provider.
+Targets [pocket-tts](https://github.com/thewh1teagle/pocket-tts-onnx) today: 38 ONNX op types, opset 17, fp32, every output matching onnxruntime's CPU provider (`chore compare`). Correct first, fast next: a frame step is one ggml graph of ~2000 small ops, so the GPU path is not yet faster than the CPU provider on this autoregressive model. Attention and norm fusion, a device-resident KV cache and quantized (`MatMulInteger`) weights are the next steps; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Develop
 

@@ -251,6 +251,89 @@ def conv_transpose1d_depthwise():
     return model(nodes, [tin("x", [1, 6, 3])], [tin("y", [1, 6, 64])], [const("w", w)]), {"x": f32(1, 6, 3)}, 1e-4, 1e-3
 
 
+# --- pocket-tts's decoder convolutions, with a symbolic length so the provider
+# --- sees a dynamic shape. Weight shapes are the model's own.
+
+
+# Metal runs the im2col matmul through its f16 simdgroup path, so a k=7 x 512
+# channel dot product (K = 3584) lands ~1e-3 off the CPU provider's f32 sum.
+# The CPU backend of the same code is accurate to ~1e-5.
+CONV_ATOL, CONV_RTOL = 1e-2, 1e-2
+
+
+def conv_case(w_shape, kernel, stride, group, cin, lin, out_ch, ltag="L"):
+    """One Conv over [1, cin, L] with L symbolic; returns (model, feeds, atol, rtol)."""
+    w = f32(*w_shape) * 0.05
+    nodes = [
+        helper.make_node("Conv", ["x", "w", "b"], ["y"], kernel_shape=[kernel], pads=[0, 0], strides=[stride], dilations=[1], group=group)
+    ]
+    inits = [const("w", w), const("b", f32(out_ch))]
+    m = model(nodes, [tin("x", [1, cin, ltag])], [tin("y", [1, out_ch, ltag + "o"])], inits)
+    return m, {"x": f32(1, cin, lin)}, CONV_ATOL, CONV_RTOL
+
+
+def conv_transpose_case(w_shape, kernel, stride, group, cin, lin, out_ch):
+    w = f32(*w_shape) * 0.05
+    nodes = [
+        helper.make_node(
+            "ConvTranspose", ["x", "w", "b"], ["y"], kernel_shape=[kernel], strides=[stride], pads=[0, 0], dilations=[1], group=group
+        )
+    ]
+    inits = [const("w", w), const("b", f32(out_ch))]
+    m = model(nodes, [tin("x", [1, cin, "L"])], [tin("y", [1, out_ch, "Lo"])], inits)
+    return m, {"x": f32(1, cin, lin)}, CONV_ATOL, CONV_RTOL
+
+
+@case
+def conv1d_k7_512_dynamic():
+    # /conv/Conv: w [512, 512, 7], pads [0, 0], on [1, 512, L]
+    return conv_case((512, 512, 7), 7, 1, 1, 512, 9, 512)
+
+
+@case
+def conv1d_k3_256_dynamic():
+    # /conv_1/Conv: w [128, 256, 3] on [1, 256, L]
+    return conv_case((128, 256, 3), 3, 1, 1, 256, 8, 128)
+
+
+@case
+def conv1d_k1_after_transpose():
+    # /output_proj/Conv: fed by a Transpose, and L == 1 at run time, so the input
+    # is a permuted view whose ne[0] is 1 -- ggml_is_contiguous says yes while
+    # nb[0] is still strided, which the CPU im2col kernel refuses.
+    nodes = [
+        helper.make_node("Transpose", ["x"], ["xt"], perm=[0, 2, 1]),  # [1, L, 32] -> [1, 32, L]
+        helper.make_node("Conv", ["xt", "w"], ["y"], kernel_shape=[1], pads=[0, 0], strides=[1], dilations=[1], group=1),
+    ]
+    inits = [const("w", f32(512, 32, 1) * 0.05)]
+    m = model(nodes, [tin("x", [1, "L", 32])], [tin("y", [1, 512, "L"])], inits)
+    return m, {"x": f32(1, 1, 32)}, 1e-4, 1e-3
+
+
+@case
+def conv_transpose1d_k12_s6():
+    # /convtr_1/ConvTranspose: w [512, 256, 12], stride 6
+    return conv_transpose_case((512, 256, 12), 12, 6, 1, 512, 4, 256)
+
+
+@case
+def conv_transpose1d_k10_s5():
+    # /convtr_2/ConvTranspose: w [256, 128, 10], stride 5
+    return conv_transpose_case((256, 128, 10), 10, 5, 1, 256, 5, 128)
+
+
+@case
+def conv_transpose1d_k8_s4():
+    # /convtr_3/ConvTranspose: w [128, 64, 8], stride 4
+    return conv_transpose_case((128, 64, 8), 8, 4, 1, 128, 6, 64)
+
+
+@case
+def conv_transpose1d_depthwise_512():
+    # /convtr/ConvTranspose: w [512, 1, 32], group 512, stride 16, on [1, 512, L]
+    return conv_transpose_case((512, 1, 32), 32, 16, 512, 512, 3, 512)
+
+
 @case
 def shape_chain_dynamic():
     # positions from a dynamic length: Shape -> Gather -> Range -> Cast -> Cos, then broadcast add
@@ -337,6 +420,51 @@ def six_dim_kv_cache():
     inits = [const("layer", np.int64(1)), const("zero", np.int64(0)), const("ax", np.array([1, 2], dtype=np.int64))]
     feeds = {"kv": f32(5, 3, 2, 1, 2, 4), "new": f32(1, 2, 1, 4)}
     return model(nodes, [tin("kv", ["past", 3, 2, 1, 2, 4]), tin("new", [1, 2, 1, 4])], [tin("y", ["p1", 2, 1, 1, 2, 4])], inits), feeds, 1e-6, 1e-5
+
+
+@case
+def five_dim_slice_gather():
+    # [past, 3, 2, H, D]: slice off the first step, select a layer, rebuild 5-D
+    nodes = [
+        helper.make_node("Slice", ["kv", "s0", "e0", "a0"], ["tail"]),  # [past-1, 3, 2, H, D]
+        helper.make_node("Gather", ["tail", "layer"], ["lkv"], axis=1),  # [past-1, 2, H, D]
+        helper.make_node("Transpose", ["lkv"], ["t"], perm=[1, 0, 2, 3]),  # [2, past-1, H, D]
+        helper.make_node("Transpose", ["t"], ["tb"], perm=[1, 0, 2, 3]),  # [past-1, 2, H, D]
+        helper.make_node("Unsqueeze", ["tb", "ax"], ["u"]),  # [past-1, 1, 2, H, D]
+        helper.make_node("Concat", ["u", "u"], ["y"], axis=1),  # [past-1, 2, 2, H, D]
+    ]
+    inits = [
+        const("s0", np.array([1], dtype=np.int64)),
+        const("e0", np.array([1 << 30], dtype=np.int64)),
+        const("a0", np.array([0], dtype=np.int64)),
+        const("layer", np.int64(2)),
+        const("ax", np.array([1], dtype=np.int64)),
+    ]
+    feeds = {"kv": f32(5, 3, 2, 4, 8)}
+    ins = [tin("kv", ["past", 3, 2, 4, 8])]
+    outs = [tin("y", ["p1", 2, 2, 4, 8])]
+    return model(nodes, ins, outs, inits), feeds, 1e-6, 1e-5
+
+
+@case
+def six_dim_split_roundtrip():
+    # a 6-D cache split along the k/v axis and concatenated back the other way round
+    nodes = [
+        helper.make_node("Gather", ["kv", "layer"], ["lkv"], axis=1),  # [past, 2, 1, H, D]
+        helper.make_node("Unsqueeze", ["lkv", "ax"], ["u6"]),  # [past, 1, 2, 1, H, D]
+        helper.make_node("Concat", ["u6", "u6"], ["c6"], axis=1),  # [past, 2, 2, 1, H, D]
+        helper.make_node("Split", ["c6", "sizes"], ["p", "q"], axis=2),  # two [past, 2, 1, 1, H, D]
+        helper.make_node("Concat", ["q", "p"], ["y"], axis=2),  # [past, 2, 2, 1, H, D]
+    ]
+    inits = [
+        const("layer", np.int64(1)),
+        const("ax", np.array([1], dtype=np.int64)),
+        const("sizes", np.array([1, 1], dtype=np.int64)),
+    ]
+    feeds = {"kv": f32(4, 3, 2, 1, 2, 8)}
+    ins = [tin("kv", ["past", 3, 2, 1, 2, 8])]
+    outs = [tin("y", ["past", 2, 2, 1, 2, 8])]
+    return model(nodes, ins, outs, inits), feeds, 1e-6, 1e-5
 
 
 @case
