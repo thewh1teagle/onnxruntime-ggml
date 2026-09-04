@@ -1,8 +1,9 @@
 # onnxruntime-ggml tasks. Run `chore list` to see them.
 #
-# Nothing here compiles onnxruntime or ggml. The provider links prebuilt ggml
-# static libraries (libs/) and only needs onnxruntime's C headers (libs/ort/);
-# the onnxruntime wheel supplies the API table at load time.
+# Nothing here compiles onnxruntime. The provider links prebuilt ggml static
+# libraries (libs/) and only needs onnxruntime's C headers (libs/ort/); the
+# onnxruntime wheel supplies the API table at load time. ggml itself is built by
+# `chore build-libs` and published from this repository; see libs/libs.chore.
 require 1.7.0
 
 include libs/libs.chore

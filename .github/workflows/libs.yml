@@ -1,0 +1,94 @@
+name: Libraries
+
+# Builds the ggml static libraries this repository links against and uploads one
+# archive per platform to the release named by `chore libs-tag`
+# (libraries-ggml-<ggml-version>-r<revision>). Every job races to create that
+# release; `chore upload-libs` wraps the create in `try`, so the first wins and the
+# rest only upload.
+#
+# Bump libs/revision in the same commit as any change under libs/, or upload-libs
+# refuses to overwrite the bundle an older release still links against.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "libs/**"
+      - ".github/workflows/libs.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: darwin-arm64
+          - runner: macos-13
+            platform: darwin-x86_64
+          # ubuntu-22.04 so the libraries need only GLIBC >= 2.35 / GLIBCXX >= 3.4.30.
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+          - runner: ubuntu-22.04-arm
+            platform: linux-aarch64
+          - runner: windows-2022
+            platform: windows-amd64-msvc
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # glslc compiles the Vulkan backend's shaders; the headers come with the SDK.
+      # Nothing links the loader (libs/patches/0003 opens it at runtime).
+      - name: Install Vulkan tools (Linux x86_64)
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          # glslc and libshaderc-dev are not in Ubuntu 22.04's own repos on amd64.
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list http://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq vulkan-sdk glslang-tools
+      - name: Install Vulkan tools (Linux ARM64)
+        if: matrix.platform == 'linux-aarch64'
+        # LunarG publishes no ARM64 apt packages; jammy's own shaderc and vulkan
+        # headers are enough, since only glslc and the headers are used.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvulkan-dev glslang-tools glslc libshaderc-dev
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install vulkan-sdk -y
+      - name: Configure Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) { throw "Vulkan SDK was not installed under C:\VulkanSDK" }
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "Vulkan_INCLUDE_DIR=$($sdk.FullName)\Include" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "Vulkan_LIBRARY=$($sdk.FullName)\Lib\vulkan-1.lib" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$($sdk.FullName)\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      # llvm-nm and llvm-objcopy, for the two x86_64 CPU backend builds
+      # (stage-cpu-variant). arm64 macOS and Linux build one CPU backend and use
+      # the system nm/objcopy, so they need nothing here.
+      - name: Install LLVM tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install llvm -y
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Install LLVM tools (macOS Intel)
+        # Xcode ships llvm-nm but not llvm-objcopy.
+        if: matrix.platform == 'darwin-x86_64'
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - uses: getchore/setup-chore@v1
+      - name: Build and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: chore upload-libs
