@@ -66,7 +66,7 @@ unsafe extern "C" fn compute(
         let span = tracing::debug_span!("compute", node = %info.name, run = run_no);
         let _e = span.enter();
         let started = Instant::now();
-        let inputs = kernel::read_inputs(kernel_ctx)?;
+        let inputs = kernel::read_input_refs(kernel_ctx)?;
         let t_in = started.elapsed();
         let outputs = info.program.run(inputs)?;
         let t_run = started.elapsed() - t_in;

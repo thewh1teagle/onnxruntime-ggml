@@ -85,14 +85,21 @@ impl Sticky {
     /// The resident tensor for `name`, or `None` when this input has proved to
     /// change from run to run and is better uploaded into the run's own graph.
     pub fn get(&mut self, backend: &Backend, name: &str, t: &HostTensor) -> Result<Option<DeviceTensor>> {
+        let data = t.as_f32();
+        self.get_raw(backend, name, &t.shape, &data)
+    }
+
+    /// Same, on a borrowed f32 slice (no copy on a hit).
+    pub fn get_raw(&mut self, backend: &Backend, name: &str, shape: &[usize], data: &[f32]) -> Result<Option<DeviceTensor>> {
         if self.volatile.contains(name) {
             return Ok(None);
         }
-        let data = t.as_f32();
-        let fp = fingerprint(&data);
+        let t_fp = std::time::Instant::now();
+        let fp = fingerprint(data);
         let nbytes = data.len() * 4;
+        tracing::trace!(name, nbytes, fp_us = t_fp.elapsed().as_micros() as u64, "sticky fingerprint");
         if let Some(e) = self.entries.get(name) {
-            if e.nbytes == nbytes && e.d.shape() == t.shape && e.fp == fp {
+            if e.nbytes == nbytes && e.d.shape() == shape && e.fp == fp {
                 self.stats.hits += 1;
                 self.stats.bytes_saved += nbytes;
                 tracing::trace!(name, bytes = nbytes, "sticky hit");
@@ -106,7 +113,7 @@ impl Sticky {
             tracing::debug!(name, bytes = nbytes, "sticky input changed, not kept resident");
             return Ok(None);
         }
-        let e = unsafe { alloc(backend, name, t, &data, fp)? };
+        let e = unsafe { alloc(backend, name, shape, data, fp)? };
         let d = e.d;
         self.entries.insert(name.to_owned(), e);
         self.stats.misses += 1;
@@ -115,7 +122,7 @@ impl Sticky {
     }
 }
 
-unsafe fn alloc(backend: &Backend, name: &str, t: &HostTensor, data: &[f32], fp: u64) -> Result<Entry> {
+unsafe fn alloc(backend: &Backend, name: &str, shape: &[usize], data: &[f32], fp: u64) -> Result<Entry> {
     let ctx = g::ggml_init(g::ggml_init_params {
         mem_size: g::ggml_tensor_overhead() * 2,
         mem_buffer: std::ptr::null_mut(),
@@ -124,7 +131,7 @@ unsafe fn alloc(backend: &Backend, name: &str, t: &HostTensor, data: &[f32], fp:
     if ctx.is_null() {
         return Err(Error::ggml("ggml_init for a sticky input failed"));
     }
-    let d = match ggml::new_tensor(ctx, DType::F32, &t.shape) {
+    let d = match ggml::new_tensor(ctx, DType::F32, shape) {
         Ok(d) => d,
         Err(e) => {
             g::ggml_free(ctx);

@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 use crate::exec::backend::{Backend, WeightPrecision};
 use crate::exec::fusion;
 use crate::exec::ggml::{self, Ctx};
+use crate::exec::input::InputRef;
 use crate::exec::runtime::Run;
 use crate::exec::sticky::Sticky;
 use crate::exec::value::DeviceTensor;
@@ -142,7 +143,7 @@ impl Program {
 
     /// Run the program on host inputs given in `graph.inputs` order; returns
     /// outputs in `graph.outputs` order.
-    pub fn run(&self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+    pub fn run(&self, inputs: Vec<InputRef>) -> Result<Vec<HostTensor>> {
         let _guard = self.backend.lock.lock().map_err(|_| Error::internal("backend lock poisoned"))?;
         let mut run = Run::new(self)?;
         run.execute(inputs)

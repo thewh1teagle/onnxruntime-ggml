@@ -22,6 +22,7 @@ use ggml_sys as g;
 use crate::error::{Error, Result};
 use crate::exec::backend::GRAPH_SIZE;
 use crate::exec::ggml::{self, Ctx};
+use crate::exec::input::InputRef;
 use crate::exec::program::Program;
 use crate::exec::sticky::Sticky;
 use crate::exec::value::{DeviceTensor, Value};
@@ -110,9 +111,15 @@ pub struct In {
     pub v: Value,
 }
 
+enum UploadSrc {
+    Owned(Vec<u8>),
+    /// Bytes owned by onnxruntime for the duration of this run (see `exec::input`).
+    Borrowed(*const u8, usize),
+}
+
 struct Upload {
     t: *mut g::ggml_tensor,
-    bytes: Vec<u8>,
+    src: UploadSrc,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -135,6 +142,8 @@ pub struct RunStats {
     pub sticky_hits: usize,
     pub sticky_misses: usize,
     pub sticky_saved: usize,
+    /// Placing the graph inputs (fingerprints, resident lookups).
+    pub input_ms: f64,
 }
 
 pub struct Run<'p> {
@@ -220,8 +229,49 @@ impl<'p> Run<'p> {
         self.stats.uploads += 1;
         self.stats.upload_bytes += bytes.len();
         tracing::trace!(name, shape = ?t.shape, dtype = %dtype, bytes = bytes.len(), "upload");
-        self.uploads.push(Upload { t: d.t, bytes });
+        self.uploads.push(Upload { t: d.t, src: UploadSrc::Owned(bytes) });
         Ok(d)
+    }
+
+    /// An f32 input leaf fed straight from onnxruntime's buffer at flush time.
+    fn upload_borrowed(&mut self, shape: &[usize], ptr: *const u8, nbytes: usize, name: &str) -> Result<DeviceTensor> {
+        let d = unsafe { ggml::new_tensor(self.ctx, DType::F32, shape)? };
+        unsafe {
+            ggml::set_name(d.t, &format!("in:{name}"));
+            g::ggml_set_input(d.t);
+        }
+        self.stats.uploads += 1;
+        self.stats.upload_bytes += nbytes;
+        tracing::trace!(name, ?shape, bytes = nbytes, "upload (borrowed)");
+        self.uploads.push(Upload { t: d.t, src: UploadSrc::Borrowed(ptr, nbytes) });
+        Ok(d)
+    }
+
+    /// A large float graph input: resident (sticky) when unchanged, otherwise a
+    /// borrowed upload. Never copied to the host unless a host op asks.
+    fn place_borrowed(&mut self, name: &str, shape: &[usize], ptr: *const u8, nbytes: usize) -> Result<Value> {
+        if self.prog.backend.options.sticky && shape.len() <= ggml::MAX_RANK {
+            let data = unsafe { std::slice::from_raw_parts(ptr as *const f32, nbytes / 4) };
+            let mut sticky = self.prog.sticky.lock().map_err(|_| Error::internal("sticky cache poisoned"))?;
+            let before = sticky.stats.hits;
+            let d = sticky.get_raw(&self.prog.backend, name, shape, data)?;
+            match (d, sticky.stats.hits > before) {
+                (Some(d), true) => {
+                    self.stats.sticky_hits += 1;
+                    self.stats.sticky_saved += nbytes;
+                    return Ok(Value::Device(d));
+                }
+                (Some(d), false) => {
+                    self.stats.sticky_misses += 1;
+                    return Ok(Value::Device(d));
+                }
+                (None, _) => {
+                    self.stats.sticky_misses += 1;
+                }
+            }
+        }
+        let d = self.upload_borrowed(shape, ptr, nbytes, name)?;
+        Ok(Value::Device(d))
     }
 
     /// The device tensor for an input: as is, a resident weight, or an upload.
@@ -347,7 +397,10 @@ impl<'p> Run<'p> {
                     tracing::trace!("upload leaf unused by any node, skipped");
                     continue;
                 }
-                g::ggml_backend_tensor_set(up.t, up.bytes.as_ptr().cast(), 0, up.bytes.len());
+                match &up.src {
+                    UploadSrc::Owned(bytes) => g::ggml_backend_tensor_set(up.t, bytes.as_ptr().cast(), 0, bytes.len()),
+                    UploadSrc::Borrowed(ptr, len) => g::ggml_backend_tensor_set(up.t, (*ptr).cast(), 0, *len),
+                }
                 set += 1;
             }
             let t_alloc = started.elapsed();
@@ -417,17 +470,28 @@ impl<'p> Run<'p> {
 
     // ------------------------------------------------------------ execution
 
-    pub fn execute(&mut self, inputs: Vec<HostTensor>) -> Result<Vec<HostTensor>> {
+    pub fn execute(&mut self, inputs: Vec<InputRef>) -> Result<Vec<HostTensor>> {
         let started = Instant::now();
         let graph = &self.prog.graph;
         if inputs.len() != graph.inputs.len() {
             return Err(Error::shape(format!("{} inputs given, graph has {}", inputs.len(), graph.inputs.len())));
         }
-        for (desc, t) in graph.inputs.iter().zip(inputs) {
-            let v = if t.dtype().is_float() && t.rank() > 0 { Value::staged_of(t) } else { Value::host_of(t) };
-            tracing::trace!(input = %desc.name, value = %v.brief(), "graph input");
-            self.values.insert(desc.name.clone(), v);
+        let names: Vec<String> = graph.inputs.iter().map(|d| d.name.clone()).collect();
+        for (name, input) in names.iter().zip(inputs) {
+            let v = match input {
+                InputRef::Owned(t) => {
+                    if t.dtype().is_float() && t.rank() > 0 {
+                        Value::staged_of(t)
+                    } else {
+                        Value::host_of(t)
+                    }
+                }
+                InputRef::Borrowed { shape, ptr, nbytes, .. } => self.place_borrowed(name, &shape, ptr, nbytes)?,
+            };
+            tracing::trace!(input = %name, value = %v.brief(), "graph input");
+            self.values.insert(name.clone(), v);
         }
+        self.stats.input_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         let n = graph.nodes.len();
         for i in 0..n {
@@ -488,6 +552,7 @@ impl<'p> Run<'p> {
             readbacks = s.readbacks,
             readback = %bytes(s.readback_bytes),
             ggml_nodes = s.ggml_nodes,
+            input_ms = format!("{:.2}", s.input_ms),
             host_ms = format!("{:.2}", s.host_ms),
             emit_ms = format!("{:.2}", s.emit_ms),
             alloc_ms = format!("{:.2}", s.build_ms),
