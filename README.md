@@ -30,11 +30,33 @@ session = ggml.InferenceSession("pocket-tts-english.onnx")
 
 ## Install
 
+Wheels are attached to each [GitHub release](https://github.com/thewh1teagle/onnxruntime-ggml/releases), one per platform, with the native provider inside. Pick yours and install it by URL:
+
 ```console
-pip install onnxruntime-ggml
+# in a project
+uv add "onnxruntime-ggml @ https://github.com/thewh1teagle/onnxruntime-ggml/releases/download/v0.1.1/onnxruntime_ggml-0.1.1-py3-none-macosx_11_0_arm64.whl"
+
+# into a venv
+uv pip install https://github.com/thewh1teagle/onnxruntime-ggml/releases/download/v0.1.1/onnxruntime_ggml-0.1.1-py3-none-macosx_11_0_arm64.whl
 ```
 
-Wheels ship for macOS arm64 and x86_64, Linux x86_64 and aarch64, and Windows x64, against onnxruntime 1.29 and later.
+| Platform | Wheel |
+|---|---|
+| macOS Apple silicon | `onnxruntime_ggml-0.1.1-py3-none-macosx_11_0_arm64.whl` |
+| macOS Intel | `onnxruntime_ggml-0.1.1-py3-none-macosx_10_15_x86_64.whl` |
+| Linux x86_64 | `onnxruntime_ggml-0.1.1-py3-none-manylinux_2_28_x86_64.whl` |
+| Linux aarch64 | `onnxruntime_ggml-0.1.1-py3-none-manylinux_2_28_aarch64.whl` |
+| Windows x64 | `onnxruntime_ggml-0.1.1-py3-none-win_amd64.whl` |
+
+They need onnxruntime 1.29 or later, which `uv` pulls in. Once the package is on PyPI this becomes `uv add onnxruntime-ggml`.
+
+From a checkout instead (needs Rust and [chore](https://github.com/getchore/chore); nothing else is compiled, ggml comes prebuilt):
+
+```console
+git clone https://github.com/thewh1teagle/onnxruntime-ggml
+cd onnxruntime-ggml && chore dev          # builds the provider and puts it inside python/
+uv pip install ./python                   # from any project
+```
 
 ## Use
 
