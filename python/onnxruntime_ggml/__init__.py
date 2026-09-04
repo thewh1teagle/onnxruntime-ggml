@@ -23,7 +23,7 @@ from typing import Any, Mapping
 import onnxruntime as ort
 
 __all__ = ["EP_NAME", "InferenceSession", "devices", "library_path", "register", "session_options", "version"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 EP_NAME = "ggml"
 _registered: set[str] = set()
