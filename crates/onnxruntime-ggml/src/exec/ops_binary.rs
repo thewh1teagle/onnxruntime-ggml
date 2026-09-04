@@ -134,9 +134,11 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
 /// `out`, `b` must broadcast into it.
 pub fn broadcast_pair(run: &mut Run, a: DeviceTensor, b: DeviceTensor, out: &[usize]) -> Result<(DeviceTensor, DeviceTensor)> {
     unsafe {
+        // ggml's binary kernels read strided operands on every backend; only a
+        // repeat needs a contiguous source.
         let a = if a.shape() == out { a } else { ggml::repeat_to(run.ctx, contig(run.ctx, a), out)? };
         let b = if broadcasts_into(&b.shape(), out) { b } else { ggml::repeat_to(run.ctx, contig(run.ctx, b), out)? };
-        Ok((contig(run.ctx, a), contig(run.ctx, b)))
+        Ok((ggml::dense_rows(run.ctx, a), ggml::dense_rows(run.ctx, b)))
     }
 }
 

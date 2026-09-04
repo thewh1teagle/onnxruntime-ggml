@@ -430,7 +430,11 @@ impl<'p> Run<'p> {
                 set += 1;
             }
             let t_alloc = started.elapsed();
-            let status = g::ggml_backend_sched_graph_compute(sched, self.graph);
+            let status = if self.prog.backend.options.profile {
+                crate::exec::profile::compute_profiled(sched, self.graph, reason)
+            } else {
+                g::ggml_backend_sched_graph_compute(sched, self.graph)
+            };
             if status != g::ggml_status_GGML_STATUS_SUCCESS {
                 return Err(Error::ggml(format!("graph compute failed with status {status} ({reason})")));
             }

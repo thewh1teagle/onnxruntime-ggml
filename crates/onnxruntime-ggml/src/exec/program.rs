@@ -61,6 +61,7 @@ pub struct CompileStats {
     pub gelu_fused: usize,
     pub layer_norms_fused: usize,
     pub attention_fused: usize,
+    pub int8_matmuls_fused: usize,
     pub weights_transposed: usize,
     pub constants: usize,
     pub weights_uploaded: usize,
@@ -98,11 +99,17 @@ impl Program {
         );
 
         stats.folded = fold_constants(&mut graph)?;
+        stats.int8_matmuls_fused = fusion::fuse_dynamic_quant_matmul(&mut graph);
         stats.gelu_fused = fusion::fuse_gelu(&mut graph);
         stats.layer_norms_fused = fusion::fuse_layer_norm(&mut graph);
         let _ = Attention::Auto;
         stats.attention_fused = fusion::fuse_attention(&mut graph);
         stats.weights_transposed = pretranspose_weights(&mut graph)?;
+        if let Some(n) = graph.nodes.iter().find(|n| crate::ep::provider::FUSED_ONLY.contains(&n.op.as_str())) {
+            return Err(Error::unsupported(format!(
+                "{n}: quantised pattern not recognised (see exec::fusion::fuse_dynamic_quant_matmul)"
+            )));
+        }
         prune_constants(&mut graph);
         stats.constants = graph.constants.len();
         stats.nodes_out = graph.nodes.len();
@@ -121,6 +128,7 @@ impl Program {
             gelu_fused = stats.gelu_fused,
             layer_norms_fused = stats.layer_norms_fused,
             attention_fused = stats.attention_fused,
+            int8_matmuls_fused = stats.int8_matmuls_fused,
             weights_transposed = stats.weights_transposed,
             weights = stats.weights_uploaded,
             weight_bytes = %bytes(stats.weight_bytes),

@@ -101,6 +101,17 @@ pub unsafe fn rows_dense(t: T) -> bool {
     (*t).nb[0] == g::ggml_type_size((*t).type_)
 }
 
+/// A copy only when the inner dimension is strided: ggml's binary and concat
+/// kernels read arbitrary outer strides but want unit stride along ne0.
+pub unsafe fn dense_rows(ctx: Ctx, d: DeviceTensor) -> DeviceTensor {
+    let t = d.t;
+    if (*t).nb[0] == g::ggml_type_size((*t).type_) {
+        d
+    } else {
+        DeviceTensor { t: g::ggml_cont(ctx, t), ..d }
+    }
+}
+
 /// A contiguous copy when the tensor is a strided view, else the tensor itself.
 pub unsafe fn contig(ctx: Ctx, d: DeviceTensor) -> DeviceTensor {
     if g::ggml_is_contiguous(d.t) && rows_dense(d.t) {

@@ -59,6 +59,12 @@ pub struct Options {
     pub partial: bool,
     /// Log every value at trace level, including data heads. Slow.
     pub dump: bool,
+    /// Time every ggml kernel through the scheduler's eval callback (serialises the graph; slow, for profiling).
+    pub profile: bool,
+    /// Run ConvTranspose on the CPU backend even when a GPU is primary (measured faster on Metal).
+    pub conv_transpose_cpu: bool,
+    /// ConvTranspose as a matmul plus strided accumulates instead of ggml's kernel.
+    pub conv_transpose_matmul: bool,
     /// Add the ACCEL backends (BLAS on macOS) to the scheduler. They only take
     /// matmuls, and the split costs more than they save on this workload.
     pub accel: bool,
@@ -78,6 +84,9 @@ impl Default for Options {
             threads: default_threads(),
             partial: false,
             dump: false,
+            profile: false,
+            conv_transpose_cpu: false,
+            conv_transpose_matmul: true,
             accel: false,
             weights: WeightPrecision::F16,
             sticky: true,
@@ -99,6 +108,9 @@ impl Options {
         o.apply("threads", std::env::var("ORT_GGML_THREADS").ok().as_deref());
         o.apply("partial", std::env::var("ORT_GGML_PARTIAL").ok().as_deref());
         o.apply("dump", std::env::var("ORT_GGML_DUMP").ok().as_deref());
+        o.apply("profile", std::env::var("ORT_GGML_PROFILE").ok().as_deref());
+        o.apply("conv_transpose_cpu", std::env::var("ORT_GGML_CONV_TRANSPOSE_CPU").ok().as_deref());
+        o.apply("conv_transpose_matmul", std::env::var("ORT_GGML_CONV_TRANSPOSE_MATMUL").ok().as_deref());
         o.apply("attention", std::env::var("ORT_GGML_ATTENTION").ok().as_deref());
         o.apply("accel", std::env::var("ORT_GGML_ACCEL").ok().as_deref());
         o.apply("weights", std::env::var("ORT_GGML_WEIGHTS").ok().as_deref());
@@ -128,6 +140,9 @@ impl Options {
             },
             "partial" => self.partial = matches!(v.as_str(), "1" | "true" | "yes"),
             "dump" => self.dump = matches!(v.as_str(), "1" | "true" | "yes"),
+            "profile" => self.profile = matches!(v.as_str(), "1" | "true" | "yes"),
+            "conv_transpose_cpu" => self.conv_transpose_cpu = matches!(v.as_str(), "1" | "true" | "yes"),
+            "conv_transpose_matmul" => self.conv_transpose_matmul = matches!(v.as_str(), "1" | "true" | "yes"),
             "attention" => {
                 self.attention = match v.as_str() {
                     "auto" | "" => Attention::Auto,

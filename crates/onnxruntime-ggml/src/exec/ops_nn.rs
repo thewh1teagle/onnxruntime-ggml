@@ -228,7 +228,45 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
             pads = ?[attrs.pad_left, attrs.pad_right],
             "conv_transpose"
         );
+        if run.prog.backend.options.conv_transpose_matmul && n == 1 {
+            // cols[t, m, k] = sum_c x[c, t] * w[c, m, k]: one matmul. Then
+            // out[m, t*s + k] += cols[t, m, k] for each k: K strided accumulates
+            // (ggml_acc into a view of the output). ggml's own conv_transpose_1d
+            // kernel is a naive loop, ten times slower for mimi's layers.
+            let full = (l - 1) * attrs.stride + k;
+            let f = std::mem::size_of::<f32>();
+            let w2 = g::ggml_reshape_2d(ctx, contig(ctx, wk).t, (m * k) as i64, c as i64); // ne=[M*K, C]
+            let wt = g::ggml_cont(ctx, g::ggml_transpose(ctx, w2)); // ne=[C, M*K]
+            let x2 = g::ggml_reshape_2d(ctx, contig(ctx, xin).t, l as i64, c as i64); // ne=[L, C]
+            let xt = g::ggml_cont(ctx, g::ggml_transpose(ctx, x2)); // ne=[C, L]
+            let cols = g::ggml_mul_mat(ctx, wt, xt); // ne=[M*K, L]
+            let cols3 = g::ggml_reshape_3d(ctx, cols, k as i64, m as i64, l as i64); // ne=[K, M, L]
+            let perm = g::ggml_cont(ctx, g::ggml_permute(ctx, cols3, 2, 0, 1, 3)); // ne=[M, L, K]
+            let zero = run.scalar(0.0)?;
+            // transposed output ne=[M, full]: positions on ne1, so a stride-s view is expressible
+            let mut out_t = g::ggml_repeat_4d(ctx, zero.t, m as i64, full as i64, 1, 1);
+            for kk in 0..k {
+                let slice = g::ggml_view_2d(ctx, perm, m as i64, l as i64, m * f, kk * m * l * f); // ne=[M, L], contiguous
+                out_t = g::ggml_acc(ctx, out_t, slice, attrs.stride * m * f, full * m * f, full * m * f, kk * m * f);
+            }
+            let out = g::ggml_cont(ctx, g::ggml_transpose(ctx, out_t)); // ne=[full, M] = ONNX [1, M, full]
+            tracing::trace!(node = %node, l, c, m, k, stride = attrs.stride, full, "conv_transpose as matmul + acc");
+            let mut y = dev(out, &[n, m, full]);
+            if attrs.pad_left > 0 || attrs.pad_right > 0 {
+                let l_out = full.saturating_sub(attrs.pad_left + attrs.pad_right);
+                y = ggml::view_slice(ctx, y, &[0, 0, attrs.pad_left], &[n, m, l_out])?;
+                y = contig(ctx, y);
+            }
+            return add_bias(run, y, bias);
+        }
         let t = g::ggml_conv_transpose_1d(ctx, wk.t, xin.t, attrs.stride as i32, 0, 1);
+        // ggml's Metal conv_transpose_1d is far slower than its CPU kernel for these
+        // sizes (5 ms vs well under 1 ms for mimi's layers); pin the node to the CPU
+        // backend and let the scheduler move the small operands.
+        if run.prog.backend.gpu && run.prog.backend.options.conv_transpose_cpu {
+            g::ggml_backend_sched_set_tensor_backend(run.prog.backend.sched, t, run.prog.backend.cpu());
+            tracing::trace!(node = %node, "conv_transpose pinned to the cpu backend");
+        }
         let full = (l - 1) * attrs.stride + k;
         let mut y = dev(t, &[n, m, full]);
         if attrs.pad_left > 0 || attrs.pad_right > 0 {

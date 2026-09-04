@@ -34,8 +34,11 @@ pub struct Provider {
     pub programs: Mutex<Vec<Arc<Program>>>,
 }
 
+/// Ops that exist only to be fused away at compile time (`exec::fusion`).
+pub const FUSED_ONLY: &[&str] = &["DynamicQuantizeLinear", "MatMulInteger"];
+
 pub fn op_supported(op: &str, domain: &str) -> bool {
-    (domain.is_empty() || domain == "ai.onnx") && (eval::supported(op) || device_capable(op))
+    (domain.is_empty() || domain == "ai.onnx") && (eval::supported(op) || device_capable(op) || FUSED_ONLY.contains(&op))
 }
 
 impl Provider {

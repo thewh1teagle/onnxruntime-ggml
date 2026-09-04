@@ -9,7 +9,19 @@ use ort_ep_sys::OrtSessionOptions;
 use crate::exec::backend::Options;
 use crate::ort::api::api;
 
-pub const KEYS: &[&str] = &["device", "threads", "partial", "dump", "accel", "weights", "attention", "sticky"];
+pub const KEYS: &[&str] = &[
+    "device",
+    "threads",
+    "partial",
+    "dump",
+    "accel",
+    "weights",
+    "attention",
+    "sticky",
+    "profile",
+    "conv_transpose_cpu",
+    "conv_transpose_matmul",
+];
 
 /// # Safety
 /// `session_options` is the pointer onnxruntime passed to `CreateEp` (valid for that call only).

@@ -6,6 +6,9 @@
 //! the earliest node removed (which is after every producer it reads).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use crate::host::tensor::HostTensor;
 
 use crate::ir::{Graph, Node};
 
@@ -164,9 +167,13 @@ pub fn fuse_layer_norm(graph: &mut Graph) -> usize {
         let mut found: Option<(Vec<usize>, Node)> = None;
 
         for (pi, pow) in graph.nodes.iter().enumerate() {
-            if pow.op != "Pow" || !const_scalar(graph, &pow.inputs[1]).is_some_and(|c| near(c, 2.0)) {
+            // d^2 as Pow(d, 2) (Optimum) or Mul(d, d) (torch.export of pocket-tts)
+            let is_square = (pow.op == "Pow" && const_scalar(graph, &pow.inputs[1]).is_some_and(|c| near(c, 2.0)))
+                || (pow.op == "Mul" && pow.inputs.len() == 2 && pow.inputs[0] == pow.inputs[1]);
+            if !is_square {
                 continue;
             }
+            let d_uses = if pow.op == "Mul" { 3 } else { 2 };
             // Sub(x, ReduceMean(x, axis))
             let Some(&si) = pow.input(0).and_then(|n| producers.get(n)) else { continue };
             let sub = &graph.nodes[si];
@@ -211,8 +218,8 @@ pub fn fuse_layer_norm(graph: &mut Graph) -> usize {
             if !one(&sqrt.outputs[0]) {
                 continue;
             }
-            // `d` feeds both Pow and Div and nothing else
-            if consumers.get(sub.outputs[0].as_str()) != Some(&2) {
+            // `d` feeds the square and Div and nothing else
+            if consumers.get(sub.outputs[0].as_str()) != Some(&d_uses) {
                 continue;
             }
             let Some((si2, scale_mul)) =
@@ -501,4 +508,117 @@ mod attention_tests {
         assert_eq!(n.inputs, vec!["q", "kt", "v", "mask"]);
         assert!((n.attr_f("scale", 0.0) - 0.125).abs() < 1e-7);
     }
+}
+
+// ---------------------------------------------------------------- dynamic int8 matmul
+
+/// onnxruntime's dynamic quantisation (`quantize_dynamic`, MatMulInteger mode):
+///
+/// ```text
+/// xq, xs, xzp = DynamicQuantizeLinear(x)
+/// y_i32       = MatMulInteger(xq, Wq_int8, xzp, wzp)
+/// y           = Cast(y_i32) * (xs * ws)
+/// ```
+///
+/// equals `x · ((Wq - wzp) * ws)` up to the activation rounding, so the group
+/// becomes one `MatMul(x, W_deq)` with `W_deq` a new f32 constant. ggml has
+/// no integer matmul; its own weight quantisation happens on upload.
+pub fn fuse_dynamic_quant_matmul(graph: &mut Graph) -> usize {
+    let mut fused = 0usize;
+    loop {
+        let producers = graph.producers();
+        let consumers = graph.consumer_counts();
+        let mut found: Option<(Vec<usize>, Node, String, Arc<HostTensor>)> = None;
+        for (mi, mm) in graph.nodes.iter().enumerate() {
+            if mm.op != "MatMulInteger" || mm.inputs.len() < 2 {
+                continue;
+            }
+            let Some(&di) = producers.get(mm.inputs[0].as_str()) else { continue };
+            let dql = &graph.nodes[di];
+            if dql.op != "DynamicQuantizeLinear" || dql.outputs.len() < 3 {
+                continue;
+            }
+            let x = dql.inputs[0].clone();
+            let (xq, xs, xzp) = (&dql.outputs[0], &dql.outputs[1], &dql.outputs[2]);
+            if mm.input(2) != Some(xzp.as_str()) {
+                continue;
+            }
+            let Some(wq) = graph.constants.get(&mm.inputs[1]) else { continue };
+            if wq.rank() != 2 {
+                continue;
+            }
+            let wzp = mm.input(3).and_then(|n| graph.constants.get(n).cloned());
+            // Cast(to=float) -> Mul(., scales)
+            let y = mm.outputs[0].as_str();
+            let Some((ci, cast)) = graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Cast" && n.inputs[0] == y) else {
+                continue;
+            };
+            let cy = cast.outputs[0].as_str();
+            let Some((si, smul)) =
+                graph.nodes.iter().enumerate().find(|(_, n)| n.op == "Mul" && n.inputs.contains(&cy.to_string()))
+            else {
+                continue;
+            };
+            let scales = if smul.inputs[0] == cy { smul.inputs[1].clone() } else { smul.inputs[0].clone() };
+            // scales = Mul(xs, ws) or a constant (static activation scale)
+            let mut remove = vec![di, mi, ci, si];
+            let ws: Arc<HostTensor> = if let Some(c) = graph.constants.get(&scales) {
+                c.clone()
+            } else {
+                let Some(&pi) = producers.get(scales.as_str()) else { continue };
+                let p = &graph.nodes[pi];
+                if p.op != "Mul" {
+                    continue;
+                }
+                let other = if p.inputs[0] == *xs {
+                    &p.inputs[1]
+                } else if p.inputs[1] == *xs {
+                    &p.inputs[0]
+                } else {
+                    continue;
+                };
+                let Some(c) = graph.constants.get(other) else { continue };
+                remove.push(pi);
+                c.clone()
+            };
+            if consumers.get(xq.as_str()) != Some(&1) || consumers.get(y) != Some(&1) || consumers.get(cy) != Some(&1) {
+                continue;
+            }
+            // W_deq[k, n] = (Wq[k, n] - wzp[n]) * ws[n]
+            let (k, n) = (wq.shape[0], wq.shape[1]);
+            let w = wq.as_f64();
+            let zp = wzp.as_ref().map(|z| z.as_f64().into_owned()).unwrap_or_default();
+            let sc = ws.as_f64().into_owned();
+            let per_col = |v: &[f64], j: usize| -> f64 {
+                if v.is_empty() {
+                    0.0
+                } else if v.len() == 1 {
+                    v[0]
+                } else {
+                    v[j]
+                }
+            };
+            let mut deq = vec![0f32; k * n];
+            for i in 0..k {
+                for j in 0..n {
+                    deq[i * n + j] = ((w[i * n + j] - per_col(&zp, j)) * per_col(&sc, j)) as f32;
+                }
+            }
+            let wname = format!("{}__deq", mm.inputs[1]);
+            let out = smul.outputs[0].clone();
+            let node = Node::new("MatMul", &format!("{}_deq", mm.name), &[&x, &wname], &[&out]);
+            found = Some((remove, node, wname, Arc::new(HostTensor::f32(vec![k, n], deq))));
+            break;
+        }
+        let Some((remove, node, wname, w)) = found else { break };
+        graph.constants.insert(wname, w);
+        tracing::trace!(node = %node.name, "fused dynamic int8 matmul");
+        splice_at_last(graph, &remove, node);
+        fused += 1;
+    }
+    if fused > 0 {
+        let pruned = prune_dead_nodes(graph);
+        tracing::info!(fused, pruned, "dynamic int8 matmul fusion");
+    }
+    fused
 }

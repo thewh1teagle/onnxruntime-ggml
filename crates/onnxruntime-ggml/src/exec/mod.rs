@@ -21,6 +21,7 @@ pub mod input;
 pub mod ops_binary;
 pub mod ops_nn;
 pub mod ops_shape;
+pub mod profile;
 pub mod program;
 pub mod runtime;
 pub mod sticky;

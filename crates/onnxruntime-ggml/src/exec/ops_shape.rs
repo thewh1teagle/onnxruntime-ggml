@@ -98,7 +98,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
                     continue;
                 }
                 let d = run.dev_f32(i)?;
-                let d = unsafe { contig(run.ctx, d) };
+                let d = unsafe { ggml::dense_rows(run.ctx, d) };
                 acc = Some(match acc {
                     None => d,
                     Some(a) if rank > MAX_RANK => unsafe { fold::concat_axis(run.ctx, a, d, axis)? },
