@@ -80,6 +80,9 @@ pub struct Program {
     /// models are dispatch-bound and run faster there).
     pub device: g::ggml_backend_t,
     pub device_name: String,
+    /// Graph allocator for programs that run on a single backend (the CPU): the
+    /// scheduler's per-node assignment passes are pure overhead there.
+    pub galloc: Galloc,
     pub weights: Weights,
     pub last_use: HashMap<String, usize>,
     pub stats: CompileStats,
@@ -92,6 +95,20 @@ pub struct Program {
 // `device` is a ggml backend handle owned by `backend`, which is already Send + Sync.
 unsafe impl Send for Program {}
 unsafe impl Sync for Program {}
+
+/// A `ggml_gallocr` owned by a program; null when the program uses the scheduler.
+pub struct Galloc(pub g::ggml_gallocr_t);
+
+unsafe impl Send for Galloc {}
+unsafe impl Sync for Galloc {}
+
+impl Drop for Galloc {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { g::ggml_gallocr_free(self.0) };
+        }
+    }
+}
 
 impl Program {
     pub fn compile(name: &str, mut graph: Graph, backend: Arc<Backend>) -> Result<Program> {
@@ -131,6 +148,13 @@ impl Program {
         };
         tracing::info!(device = %device_name, approx_weight_bytes = %bytes(total_weight_bytes), gpu_min = %bytes(backend.options.gpu_min_weight_bytes), "program device");
         let weights = upload_weights(&graph, &backend, device)?;
+        // Only the CPU backend runs every op; on the GPU the scheduler must stay for fallbacks.
+        let galloc = if device == backend.cpu() && !backend.options.profile {
+            Galloc(unsafe { g::ggml_gallocr_new(g::ggml_backend_get_default_buffer_type(device)) })
+        } else {
+            Galloc(std::ptr::null_mut())
+        };
+        tracing::info!(single_backend = !galloc.0.is_null(), "graph allocation");
         stats.weights_uploaded = weights.tensors.len();
         stats.weight_bytes = weights.nbytes;
         stats.weights_f16 = weights.n_f16;
@@ -163,6 +187,7 @@ impl Program {
             backend,
             device,
             device_name,
+            galloc,
             weights,
             last_use,
             stats,

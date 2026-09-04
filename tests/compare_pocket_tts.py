@@ -87,7 +87,10 @@ def main() -> int:
     print(f"cpu: {len(audio_ref) / sr:.2f}s of audio in {cpu_s:.2f}s, {len(rec.calls)} runs recorded")
 
     # 2. replay on ggml
-    gsess = ggml.InferenceSession(args.model)
+    # weights=f32: this is an exactness check. The f16 default rounds activations to
+    # f16 inside ggml's CPU matmul kernels (1e-2 level on the KV caches); audio quality
+    # is checked by transcription instead (see docs/OPTIONS.md).
+    gsess = ggml.InferenceSession(args.model, {"weights": "f32"})
     names = [o.name for o in gsess.get_outputs()]
     failures = 0
     for i, (feeds, ref) in enumerate(rec.calls):

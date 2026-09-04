@@ -192,11 +192,11 @@ fn conv(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> 
 
 fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> {
     let attrs = ConvAttrs::from_node(node)?;
-    if attrs.group != 1 {
-        return Err(Error::unsupported("grouped ConvTranspose"));
-    }
     if attrs.dilation != 1 {
         return Err(Error::unsupported("dilated ConvTranspose"));
+    }
+    if attrs.group != 1 {
+        return conv_transpose_depthwise(run, node, ins, &attrs);
     }
     if node.attr_ints("output_padding").is_some_and(|p| p.iter().any(|&v| v != 0)) {
         return Err(Error::unsupported("ConvTranspose output_padding"));
@@ -277,6 +277,53 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
         if attrs.pad_left > 0 || attrs.pad_right > 0 {
             let l_out = full.saturating_sub(attrs.pad_left + attrs.pad_right);
             y = ggml::view_slice(ctx, y, &[0, 0, attrs.pad_left], &[n, m, l_out])?;
+            y = contig(ctx, y);
+        }
+        add_bias(run, y, bias)
+    }
+}
+
+/// Depthwise ConvTranspose (`group == channels`): `out[c, t*s + k] += x[c, t] * w[c, k]`,
+/// which is K broadcast multiplies and K strided accumulates. mimi's final
+/// upsampler is one of these; on the host it forced a flush every frame.
+fn conv_transpose_depthwise(run: &mut Run, node: &Node, ins: &[Option<In>], attrs: &ConvAttrs) -> Result<DeviceTensor> {
+    let x = run.dev_f32(need(node, ins, 0)?)?;
+    let w = run.dev_f32(need(node, ins, 1)?)?;
+    let bias = match ins.get(2).and_then(|b| b.as_ref()) {
+        Some(b) => Some(run.dev_f32(b)?),
+        None => None,
+    };
+    if x.rank != 3 || w.rank != 3 {
+        return Err(Error::unsupported("depthwise ConvTranspose other than 1-D"));
+    }
+    let (n, c, l) = (x.shape[0], x.shape[1], x.shape[2]);
+    let (cw, mg, k) = (w.shape[0], w.shape[1], w.shape[2]);
+    if n != 1 || cw != c || mg != 1 || attrs.group != c {
+        return Err(Error::unsupported(format!("ConvTranspose group {} for channels {c}, weight {:?}", attrs.group, w.shape())));
+    }
+    let ctx = run.ctx;
+    unsafe {
+        let f = std::mem::size_of::<f32>();
+        let full = (l - 1) * attrs.stride + k;
+        let xin = contig(ctx, ggml::reshape(ctx, x, &[c, l])?); // ne=[L, C]
+        let wk = contig(ctx, ggml::reshape(ctx, w, &[c, k])?); // ne=[K, C]
+                                                               // x transposed to ne=[C, L] so a stride-s view over positions is expressible
+        let xt = g::ggml_cont(ctx, g::ggml_transpose(ctx, xin.t)); // ne=[C, L]
+        let zero = run.scalar(0.0)?;
+        let mut out_t = g::ggml_repeat_4d(ctx, zero.t, c as i64, full as i64, 1, 1); // ne=[C, full]
+        for kk in 0..k {
+            // w[:, kk] as a column ne=[C, 1] broadcast over L
+            let wcol = g::ggml_view_2d(ctx, wk.t, 1, c as i64, k * f, kk * f); // ne=[1, C] strided
+            let wcol = g::ggml_cont(ctx, g::ggml_transpose(ctx, wcol)); // ne=[C, 1]
+            let term = g::ggml_mul(ctx, xt, wcol); // ne=[C, L]
+            out_t = g::ggml_acc(ctx, out_t, term, attrs.stride * c * f, full * c * f, full * c * f, kk * c * f);
+        }
+        let out = g::ggml_cont(ctx, g::ggml_transpose(ctx, out_t)); // ne=[full, C]
+        tracing::trace!(node = %node, c, l, k, stride = attrs.stride, full, "depthwise conv_transpose on device");
+        let mut y = dev(out, &[n, c, full]);
+        if attrs.pad_left > 0 || attrs.pad_right > 0 {
+            let l_out = full.saturating_sub(attrs.pad_left + attrs.pad_right);
+            y = ggml::view_slice(ctx, y, &[0, 0, attrs.pad_left], &[n, c, l_out])?;
             y = contig(ctx, y);
         }
         add_bias(run, y, bias)

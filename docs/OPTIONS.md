@@ -26,6 +26,8 @@ onnxruntime stores them as session config entries `ep.ggml.<key>`, which is also
 
 ### `weights`
 
+On the CPU backend ggml's f16 matmul kernels convert the activations to f16 as well, so results differ from an f32 run at the 1e-2 level on large-magnitude tensors such as KV caches; Metal keeps activations in f32. `weights=f32` gives bit-for-bit agreement with the fp32 reference at about 30% more time per step on the CPU backend.
+
 `f16` stores every 2-D weight matrix `ggml_mul_mat` reads as src0 (the
 pre-transposed MatMul weights and Gemm B operands with `transB=1`) as
 `GGML_TYPE_F16` on the device, halving the resident bytes. Biases, norm scales

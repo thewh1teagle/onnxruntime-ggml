@@ -413,9 +413,16 @@ impl<'p> Run<'p> {
                 list.sort_by_key(|e| std::cmp::Reverse(e.1));
                 tracing::debug!(ops = ?list, "ggml graph ops");
             }
-            g::ggml_backend_sched_reset(sched);
-            if !g::ggml_backend_sched_alloc_graph(sched, self.graph) {
-                return Err(Error::ggml(format!("scheduler could not allocate a graph of {n_nodes} nodes ({reason})")));
+            let single = !self.prog.galloc.0.is_null();
+            if single {
+                if !g::ggml_gallocr_alloc_graph(self.prog.galloc.0, self.graph) {
+                    return Err(Error::ggml(format!("could not allocate a graph of {n_nodes} nodes ({reason})")));
+                }
+            } else {
+                g::ggml_backend_sched_reset(sched);
+                if !g::ggml_backend_sched_alloc_graph(sched, self.graph) {
+                    return Err(Error::ggml(format!("scheduler could not allocate a graph of {n_nodes} nodes ({reason})")));
+                }
             }
             let mut set = 0usize;
             for up in &self.uploads {
@@ -430,7 +437,9 @@ impl<'p> Run<'p> {
                 set += 1;
             }
             let t_alloc = started.elapsed();
-            let status = if self.prog.backend.options.profile {
+            let status = if single {
+                g::ggml_backend_graph_compute(self.prog.device, self.graph)
+            } else if self.prog.backend.options.profile {
                 crate::exec::profile::compute_profiled(sched, self.graph, reason)
             } else {
                 g::ggml_backend_sched_graph_compute(sched, self.graph)
@@ -439,11 +448,13 @@ impl<'p> Run<'p> {
                 return Err(Error::ggml(format!("graph compute failed with status {status} ({reason})")));
             }
             let t_compute = started.elapsed() - t_alloc;
-            tracing::debug!(
-                splits = g::ggml_backend_sched_get_n_splits(sched),
-                copies = g::ggml_backend_sched_get_n_copies(sched),
-                "scheduler"
-            );
+            if !single {
+                tracing::debug!(
+                    splits = g::ggml_backend_sched_get_n_splits(sched),
+                    copies = g::ggml_backend_sched_get_n_copies(sched),
+                    "scheduler"
+                );
+            }
             let t_read0 = Instant::now();
             let mut read_bytes = 0usize;
             for (name, d) in &outs {
