@@ -30,8 +30,8 @@ The Python tests find the freshly built library automatically (`tests/_common.py
 | `libs/revision` | bundle revision; bumped by hand with any other change under `libs/` |
 | `libs/patches/*.patch` | fixes applied to the ggml checkout before it is built; each file's header says what it is for |
 | `libs/ort-version` | onnxruntime tag the C headers come from |
-| `libs/include/` | ggml headers (checked in; `chore fetch-headers`) |
-| `libs/ort/include/` | onnxruntime headers (checked in; `chore fetch-ort-headers`) |
+| `libs/include/` | ggml headers (ignored; `chore headers` fetches them at the pinned tag) |
+| `libs/ort/include/` | onnxruntime headers (ignored; same) |
 | `libs/lib/` | prebuilt ggml static libraries (ignored; `chore fetch-libs`) |
 
 The libraries are ours. `chore build-libs` clones ggml at `libs/ggml-version`, applies `libs/patches/`, builds it and writes `target/ggml-libs-<platform>.tar.gz` with `lib/` and `include/` at the archive root; `chore upload-libs` does that and attaches the archive to the release named by `chore libs-tag`, `libraries-ggml-<ggml-version>-r<revision>` on this repository. `chore fetch-libs` computes the same tag and downloads from it. The `.github/workflows/libs.yml` matrix runs `chore upload-libs` on every platform; the first job to finish creates the release, the rest upload into it.

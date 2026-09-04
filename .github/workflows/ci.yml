@@ -23,7 +23,7 @@ jobs:
       - uses: getchore/setup-chore@v1
       - uses: astral-sh/setup-uv@v5
       - name: Fetch ggml libraries
-        run: chore fetch-libs
+        run: chore headers && chore fetch-libs
       - name: Lint
         run: chore lint
       - name: Test

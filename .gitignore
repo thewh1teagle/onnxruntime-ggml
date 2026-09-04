@@ -1,5 +1,7 @@
 /target
 /libs/lib
+/libs/include
+/libs/ort/include
 /dist
 /models
 /python/onnxruntime_ggml/lib/*

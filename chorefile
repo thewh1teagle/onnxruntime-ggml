@@ -30,8 +30,15 @@ task lib-name {
     else { echo "libonnxruntime_ggml.so" }
 }
 
+# Fetch the ggml and onnxruntime headers if they are not here yet.
+task headers {
+    if exists libs/include/ggml.h && exists libs/ort/include/onnxruntime_c_api.h { return }
+    fetch-headers
+}
+
 # Build the provider library in release mode.
 task build {
+    headers
     exists libs/lib || fetch-libs
     cargo build --release -p onnxruntime-ggml
     echo "built target/release/$(lib-name)"
@@ -47,6 +54,7 @@ task dev {
 
 # Run the Rust unit tests and the per-op Python tests.
 task test {
+    headers
     exists libs/lib || fetch-libs
     cargo test --workspace
     build
@@ -222,6 +230,8 @@ task format {
 
 # Lint the way CI does.
 task lint {
+    headers
+    exists libs/lib || fetch-libs
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
 }

@@ -46,7 +46,7 @@ jobs:
           if [ -n "${{ github.event.inputs.version }}" ]; then v="${{ github.event.inputs.version }}"; else v="${GITHUB_REF_NAME#v}"; fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Fetch ggml libraries
-        run: chore fetch-libs
+        run: chore headers && chore fetch-libs
       - name: Build and package
         run: chore package-lib ${{ steps.v.outputs.version }}
       - name: Upload to the release
