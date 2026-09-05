@@ -53,7 +53,7 @@ uv run tests/test_wheel.py /tmp/ggml-wheel-test/bin/python
 
 Intel macOS has a native library asset but no Python wheel because ONNX Runtime 1.29 does not distribute an Intel macOS wheel. Python installation on macOS requires macOS 14+ on Apple silicon.
 
-The wheel is pure Python plus one native library, tagged `py3-none-<platform>`. It pins `onnxruntime>=1.29,<1.31`: the plugin API version is checked at load and a mismatch fails early with a clear message.
+The wheel is pure Python plus one native library, tagged `py3-none-<platform>`. It requires Python 3.11+ and pins `onnxruntime>=1.29,<1.31`: the plugin API version is checked at load and a mismatch fails early with a clear message.
 
 ## Models
 

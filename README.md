@@ -36,6 +36,8 @@ Install the package and its bundled native provider into a virtual environment:
 uv pip install onnxruntime-ggml
 ```
 
+Requires Python 3.11 or newer.
+
 In a uv project, use `uv add onnxruntime-ggml`. The matching wheel and compatible
 onnxruntime dependency are selected automatically; no Rust build or separate
 ggml download is required.
