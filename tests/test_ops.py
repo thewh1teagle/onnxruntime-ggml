@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = ["numpy>=1.26", "onnx>=1.16", "onnxruntime>=1.29,<1.31"]
 # ///
 """Per-op tests: tiny ONNX graphs run on the CPU provider and on ggml, outputs compared.

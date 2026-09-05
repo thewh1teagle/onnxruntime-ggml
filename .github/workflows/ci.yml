@@ -14,6 +14,8 @@ jobs:
           - runner: macos-14
           - runner: ubuntu-22.04
     runs-on: ${{ matrix.runner }}
+    env:
+      UV_PYTHON: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
