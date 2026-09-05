@@ -569,8 +569,11 @@ def dynamic_int8_matmul():
     # onnxruntime quantize_dynamic output: DynamicQuantizeLinear -> MatMulInteger -> Cast -> Mul(xs*ws)
     k, n = 64, 32
     w = f32(k, n)
-    ws = (np.abs(w).max(axis=0) / 127.0).astype(np.float32)
-    wq = np.clip(np.round(w / ws), -127, 127).astype(np.int8)
+    # ORT's AVX2 U8S8 kernel saturates intermediate int16 sums with full-range
+    # weights. Use its recommended reduce_range (7-bit) input for a portable
+    # reference: https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html
+    ws = (np.abs(w).max(axis=0) / 63.0).astype(np.float32)
+    wq = np.clip(np.round(w / ws), -63, 63).astype(np.int8)
     wzp = np.zeros(n, dtype=np.int8)
     nodes = [
         helper.make_node("DynamicQuantizeLinear", ["x"], ["xq", "xs", "xzp"]),
