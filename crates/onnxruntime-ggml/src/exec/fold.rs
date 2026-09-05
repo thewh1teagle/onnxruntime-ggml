@@ -91,6 +91,9 @@ pub unsafe fn reshape_logical(ctx: Ctx, d: DeviceTensor, shape: &[usize]) -> Res
     let folded = if shape.len() <= MAX_RANK { shape.to_vec() } else { fold4(shape)? };
     let ne = ggml::ne_of(&folded)?;
     let src = contig(ctx, d);
+    if ggml::ne(src.t) == ne {
+        return Ok(ggml::dev(src.t, shape));
+    }
     let t = g::ggml_reshape_4d(ctx, src.t, ne[0], ne[1], ne[2], ne[3]);
     let out = ggml::dev(t, shape);
     trace("reshape", &out);

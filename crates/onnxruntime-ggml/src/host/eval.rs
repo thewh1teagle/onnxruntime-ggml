@@ -73,13 +73,26 @@ pub const HOST_OPS: &[&str] = &[
 ];
 
 pub fn supported(op: &str) -> bool {
+    if super::eval_random::OPS.contains(&op) {
+        return true;
+    }
     HOST_OPS.contains(&op)
+        || super::eval_index::OPS.contains(&op)
+        || super::eval_extra::OPS.contains(&op)
+        || matches!(op, "Resize" | "LSTM")
 }
 
 /// Run `node` on host inputs (`None` for omitted optional inputs).
 pub fn eval(node: &Node, inputs: &[Option<&HostTensor>]) -> Result<Vec<HostTensor>> {
     let op = node.op.as_str();
     let outs = match op {
+        op if super::eval_random::OPS.contains(&op) => {
+            return Err(Error::unsupported("random operators require a per-session stream"))
+        }
+        op if super::eval_index::OPS.contains(&op) => super::eval_index::eval(node, inputs)?,
+        op if super::eval_extra::OPS.contains(&op) => super::eval_extra::eval(node, inputs)?,
+        "Resize" => super::eval_resize::eval(node, inputs)?,
+        "LSTM" => super::eval_lstm::eval(node, inputs)?,
         "Shape" | "Reshape" | "Unsqueeze" | "Squeeze" | "Transpose" | "Concat" | "Slice" | "Gather" | "Split" | "Range"
         | "ConstantOfShape" | "Expand" | "Cast" | "Where" | "Constant" | "Identity" => eval_shape::eval(node, inputs)?,
         "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Neg" | "Abs" | "Sqrt" | "Exp" | "Log" | "Sin" | "Cos" | "Tanh" | "Sigmoid"

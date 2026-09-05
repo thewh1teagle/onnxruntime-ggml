@@ -145,6 +145,9 @@ pub unsafe fn reshape(ctx: Ctx, d: DeviceTensor, shape: &[usize]) -> Result<Devi
         return Err(Error::shape(format!("reshape {:?} -> {shape:?}", d.shape())));
     }
     let src = contig(ctx, d);
+    if (*src.t).ne == ne {
+        return Ok(dev(src.t, shape));
+    }
     let t = g::ggml_reshape_4d(ctx, src.t, ne[0], ne[1], ne[2], ne[3]);
     Ok(dev(t, shape))
 }
@@ -211,6 +214,17 @@ pub fn describe(d: &DeviceTensor) -> String {
             is_contiguous(d.t)
         )
     }
+}
+
+/// Request f32 matrix accumulation, including when the backend's default uses
+/// reduced precision for f32 operands. Weight storage precision stays unchanged.
+///
+/// # Safety
+/// The context and operands must be valid and have compatible matrix dimensions.
+pub unsafe fn mul_mat(ctx: Ctx, a: *mut g::ggml_tensor, b: *mut g::ggml_tensor) -> *mut g::ggml_tensor {
+    let out = g::ggml_mul_mat(ctx, a, b);
+    g::ggml_mul_mat_set_prec(out, g::ggml_prec_GGML_PREC_F32);
+    out
 }
 
 #[cfg(test)]

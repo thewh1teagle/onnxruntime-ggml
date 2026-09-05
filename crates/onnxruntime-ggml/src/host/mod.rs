@@ -7,8 +7,14 @@
 
 pub mod broadcast;
 pub mod eval;
+pub mod eval_control;
+pub mod eval_extra;
+pub mod eval_index;
+pub mod eval_lstm;
 pub mod eval_math;
 pub mod eval_nn;
+pub mod eval_random;
+pub mod eval_resize;
 pub mod eval_shape;
 pub mod tensor;
 

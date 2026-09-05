@@ -12,5 +12,7 @@
 *.wav
 __pycache__/
 .venv/
-/plans
+/plans/
 .DS_Store
+/INTERACTION.md
+.env.local

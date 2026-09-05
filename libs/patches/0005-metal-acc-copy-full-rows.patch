@@ -1,0 +1,21 @@
+metal: copy all row tiles before non-inplace accumulation
+
+kernel_cpy_t_t copies one element per thread. ACC previously dispatched just
+one threadgroup per row, leaving elements beyond the threadgroup limit
+uninitialized. Match the tiled dispatch used by the normal CPY path.
+
+diff --git a/src/ggml-metal/ggml-metal-ops.cpp b/src/ggml-metal/ggml-metal-ops.cpp
+index 1c3bb93..5668130 100644
+--- a/src/ggml-metal/ggml-metal-ops.cpp
++++ b/src/ggml-metal/ggml-metal-ops.cpp
+@@ -712,7 +712,9 @@ int ggml_metal_op_acc(ggml_metal_op_t ctx, int idx) {
+ 
+         const int nth = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline), ne00);
+ 
+-        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, nth, 1, 1);
++        // The copy kernel copies one element per thread. Cover every row tile.
++        const int nw0 = (ne00 + nth - 1)/nth;
++        ggml_metal_encoder_dispatch_threadgroups(enc, nw0*ne01, ne02, ne03, nth, 1, 1);
+ 
+         ggml_metal_op_concurrency_reset(ctx);
+     }

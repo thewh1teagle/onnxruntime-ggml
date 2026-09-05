@@ -99,6 +99,7 @@ pub enum Attr {
     Str(String),
     Strs(Vec<String>),
     Tensor(HostTensor),
+    Graph(Box<Graph>),
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +114,16 @@ pub struct Node {
 }
 
 impl Node {
+    /// Lexical inputs read inside nested graphs, excluding their local values.
+    pub fn captures(&self) -> Vec<String> {
+        let mut names = std::collections::HashSet::new();
+        for attr in self.attrs.values() {
+            if let Attr::Graph(g) = attr {
+                names.extend(g.free_names());
+            }
+        }
+        names.into_iter().collect()
+    }
     pub fn new(op: &str, name: &str, inputs: &[&str], outputs: &[&str]) -> Node {
         Node {
             name: name.to_owned(),
@@ -182,6 +193,8 @@ impl std::fmt::Display for Node {
 #[derive(Clone, Debug)]
 pub struct ValueDesc {
     pub name: String,
+    pub sequence: bool,
+    /// Tensor metadata; sequence element types are checked by the host value.
     pub dtype: DType,
     pub shape: Vec<Option<i64>>,
 }
@@ -200,6 +213,25 @@ pub struct Graph {
 }
 
 impl Graph {
+    pub fn free_names(&self) -> Vec<String> {
+        let mut local: std::collections::HashSet<&str> = self.inputs.iter().map(|d| d.name.as_str()).collect();
+        local.extend(self.constants.keys().map(String::as_str));
+        local.extend(self.nodes.iter().flat_map(|n| n.outputs.iter().map(String::as_str)));
+        let mut free = std::collections::HashSet::new();
+        for n in &self.nodes {
+            for name in n.inputs.iter().cloned().chain(n.captures()) {
+                if !name.is_empty() && !local.contains(name.as_str()) {
+                    free.insert(name);
+                }
+            }
+        }
+        for d in &self.outputs {
+            if !local.contains(d.name.as_str()) {
+                free.insert(d.name.clone());
+            }
+        }
+        free.into_iter().collect()
+    }
     /// Which node produces each value.
     pub fn producers(&self) -> HashMap<&str, usize> {
         let mut map = HashMap::new();
@@ -214,17 +246,20 @@ impl Graph {
     }
 
     /// How many nodes (plus graph outputs) read each value.
-    pub fn consumer_counts(&self) -> HashMap<&str, usize> {
-        let mut map: HashMap<&str, usize> = HashMap::new();
+    pub fn consumer_counts(&self) -> HashMap<String, usize> {
+        let mut map: HashMap<String, usize> = HashMap::new();
         for node in &self.nodes {
+            for name in node.captures() {
+                *map.entry(name).or_default() += 1;
+            }
             for inp in &node.inputs {
                 if !inp.is_empty() {
-                    *map.entry(inp.as_str()).or_default() += 1;
+                    *map.entry(inp.clone()).or_default() += 1;
                 }
             }
         }
         for out in &self.outputs {
-            *map.entry(out.name.as_str()).or_default() += 1;
+            *map.entry(out.name.clone()).or_default() += 1;
         }
         map
     }
@@ -233,6 +268,9 @@ impl Graph {
     pub fn last_use(&self) -> HashMap<String, usize> {
         let mut map: HashMap<String, usize> = HashMap::new();
         for (i, node) in self.nodes.iter().enumerate() {
+            for name in node.captures() {
+                map.insert(name, i);
+            }
             for inp in &node.inputs {
                 if !inp.is_empty() {
                     map.insert(inp.clone(), i);

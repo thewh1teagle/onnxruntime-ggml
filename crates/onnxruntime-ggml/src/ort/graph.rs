@@ -92,7 +92,12 @@ unsafe fn value_desc(vi: *const OrtValueInfo) -> Result<ValueDesc> {
     let mut tensor_info: *const OrtTensorTypeAndShapeInfo = std::ptr::null();
     ort_call!(CastTypeInfoToTensorInfo(type_info, &mut tensor_info))?;
     if tensor_info.is_null() {
-        return Err(Error::unsupported(format!("value '{name}' is not a tensor")));
+        let mut kind = 0;
+        ort_call!(GetOnnxTypeFromTypeInfo(type_info, &mut kind))?;
+        if kind == ONNX_TYPE_SEQUENCE {
+            return Ok(ValueDesc { name, sequence: true, dtype: DType::F32, shape: vec![] });
+        }
+        return Err(Error::unsupported(format!("value '{name}' is not a tensor or sequence")));
     }
     let mut elem: ONNXTensorElementDataType = 0;
     ort_call!(GetTensorElementType(tensor_info, &mut elem))?;
@@ -104,7 +109,7 @@ unsafe fn value_desc(vi: *const OrtValueInfo) -> Result<ValueDesc> {
         ort_call!(GetDimensions(tensor_info, dims.as_mut_ptr(), rank))?;
     }
     let shape = dims.into_iter().map(|d| if d < 0 { None } else { Some(d) }).collect();
-    Ok(ValueDesc { name, dtype, shape })
+    Ok(ValueDesc { name, sequence: false, dtype, shape })
 }
 
 /// Copy a CPU `OrtValue` tensor into a `HostTensor`.
@@ -192,6 +197,16 @@ unsafe fn import_node(node: *const OrtNode) -> Result<Node> {
             None => tracing::debug!(node = %name, attr = %aname, "attribute type skipped"),
         }
     }
+    let mut count = 0usize;
+    ort_call!(Node_GetNumSubgraphs(node, &mut count))?;
+    if count > 0 {
+        let mut graphs = vec![std::ptr::null(); count];
+        let mut names = vec![std::ptr::null(); count];
+        ort_call!(Node_GetSubgraphs(node, graphs.as_mut_ptr(), count, names.as_mut_ptr()))?;
+        for (g, name) in graphs.into_iter().zip(names) {
+            attrs.insert(cstr(name), Attr::Graph(Box::new(import(g)?)));
+        }
+    }
     Ok(Node { name, op, domain, inputs: names_of(&ins)?, outputs: names_of(&outs)?, attrs })
 }
 
@@ -227,7 +242,7 @@ unsafe fn read_attr(attr: *const OrtOpAttr) -> Result<Option<Attr>> {
         }
         ORT_OP_ATTR_INTS => {
             let bytes = read_sized(attr, ty, 8)?;
-            Some(Attr::Ints(bytes.chunks_exact(8).map(|c| i64::from_ne_bytes(c.try_into().unwrap())).collect()))
+            Some(Attr::Ints(bytes.as_chunks::<8>().0.iter().map(|c| i64::from_ne_bytes(*c)).collect()))
         }
         ORT_OP_ATTR_FLOAT => {
             let mut v: f32 = 0.0;
@@ -237,7 +252,7 @@ unsafe fn read_attr(attr: *const OrtOpAttr) -> Result<Option<Attr>> {
         }
         ORT_OP_ATTR_FLOATS => {
             let bytes = read_sized(attr, ty, 4)?;
-            Some(Attr::Floats(bytes.chunks_exact(4).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect()))
+            Some(Attr::Floats(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_ne_bytes(*c)).collect()))
         }
         ORT_OP_ATTR_STRING => {
             let bytes = read_sized(attr, ty, 1)?;
@@ -257,7 +272,8 @@ unsafe fn read_attr(attr: *const OrtOpAttr) -> Result<Option<Attr>> {
                 Some(Attr::Tensor(t?))
             }
         }
-        ORT_OP_ATTR_GRAPH => return Err(Error::unsupported("subgraph attributes (Loop/If/Scan)")),
+        ORT_OP_ATTR_GRAPH => None,
+        ORT_OP_ATTR_STRINGS => return Err(Error::unsupported("string-list attributes")),
         _ => None,
     })
 }

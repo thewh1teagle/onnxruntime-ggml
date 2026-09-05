@@ -584,6 +584,13 @@ def dynamic_int8_matmul():
     return model(nodes, [tin("x", [1, 5, k])], [tin("y", [1, 5, n])], inits), {"x": f32(1, 5, k)}, 0.25, 0.05
 
 
+import ops_extra  # noqa: E402
+import ops_control  # noqa: E402
+
+ops_extra.register(case, model, tin, const, f32)
+ops_control.register(case, model, tin, const, f32)
+
+
 def run_case(name, fn) -> tuple[bool, list[str]]:
     lines = []
     try:

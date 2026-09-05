@@ -38,7 +38,8 @@ pub struct Provider {
 pub const FUSED_ONLY: &[&str] = &["DynamicQuantizeLinear", "MatMulInteger"];
 
 pub fn op_supported(op: &str, domain: &str) -> bool {
-    (domain.is_empty() || domain == "ai.onnx") && (eval::supported(op) || device_capable(op) || FUSED_ONLY.contains(&op))
+    (domain.is_empty() || domain == "ai.onnx")
+        && (eval::supported(op) || device_capable(op) || FUSED_ONLY.contains(&op) || crate::host::eval_control::OPS.contains(&op))
 }
 
 impl Provider {
@@ -124,6 +125,12 @@ unsafe extern "C" fn get_capability(
         let provider = Provider::from_ptr(this);
         let span = tracing::info_span!("capability");
         let _e = span.enter();
+        let mut parent = std::ptr::null();
+        ort_call!(Graph_GetParentNode(graph, &mut parent))?;
+        if !parent.is_null() {
+            tracing::debug!("leaving nested graph intact for its owning control-flow operator");
+            return Ok(());
+        }
         let nodes = list_nodes(graph)?;
         if nodes.is_empty() {
             tracing::info!("empty graph, nothing to claim");
@@ -134,7 +141,7 @@ unsafe extern "C" fn get_capability(
         let mut hist: HashMap<String, usize> = HashMap::new();
         for n in &nodes {
             *hist.entry(n.op.clone()).or_default() += 1;
-            if op_supported(&n.op, &n.domain) {
+            if op_supported(&n.op, &n.domain) && nested_supported(n.ptr)? {
                 supported.push(n.ptr);
             } else {
                 let key = if n.domain.is_empty() { n.op.clone() } else { format!("{}::{}", n.domain, n.op) };
@@ -251,4 +258,23 @@ unsafe extern "C" fn default_memory_device(_this: *const OrtEp, device: *mut *co
 unsafe extern "C" fn weightless_support(_this: *const OrtEp, support: *mut OrtWeightlessSupport) -> *mut OrtStatus {
     *support = OrtWeightlessSupport_NONE;
     std::ptr::null_mut()
+}
+
+/// Check recursively before claiming a control-flow node as a whole.
+unsafe fn nested_supported(node: *const OrtNode) -> Result<bool> {
+    let mut count = 0;
+    ort_call!(Node_GetNumSubgraphs(node, &mut count))?;
+    if count == 0 {
+        return Ok(true);
+    }
+    let mut graphs = vec![std::ptr::null(); count];
+    ort_call!(Node_GetSubgraphs(node, graphs.as_mut_ptr(), count, std::ptr::null_mut()))?;
+    for graph in graphs {
+        for n in list_nodes(graph)? {
+            if !op_supported(&n.op, &n.domain) || !nested_supported(n.ptr)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }

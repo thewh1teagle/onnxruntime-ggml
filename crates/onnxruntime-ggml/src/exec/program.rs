@@ -72,6 +72,7 @@ pub struct CompileStats {
 }
 
 pub struct Program {
+    pub random: Mutex<crate::host::eval_random::Streams>,
     pub name: String,
     pub graph: Graph,
     pub backend: Arc<Backend>,
@@ -112,6 +113,9 @@ impl Drop for Galloc {
 
 impl Program {
     pub fn compile(name: &str, mut graph: Graph, backend: Arc<Backend>) -> Result<Program> {
+        if graph.inputs.iter().chain(&graph.outputs).any(|v| v.sequence) {
+            return Err(Error::unsupported("sequence-valued external graph inputs or outputs"));
+        }
         let started = Instant::now();
         let span = tracing::info_span!("compile", graph = name);
         let _enter = span.enter();
@@ -182,6 +186,7 @@ impl Program {
         }
         let input_names = graph.inputs.iter().map(|d| d.name.clone()).collect();
         Ok(Program {
+            random: Mutex::new(crate::host::eval_random::Streams::default()),
             name: name.to_owned(),
             graph,
             backend,
@@ -212,7 +217,11 @@ pub fn fold_constants(graph: &mut Graph) -> Result<usize> {
     let nodes = std::mem::take(&mut graph.nodes);
     for node in nodes {
         let all_const = node.inputs.iter().all(|i| i.is_empty() || graph.constants.contains_key(i));
-        if all_const && eval::supported(&node.op) && !node.outputs.iter().any(|o| graph.outputs.iter().any(|d| &d.name == o)) {
+        if all_const
+            && eval::supported(&node.op)
+            && !crate::host::eval_random::OPS.contains(&node.op.as_str())
+            && !node.outputs.iter().any(|o| graph.outputs.iter().any(|d| &d.name == o))
+        {
             let ins: Vec<Option<&HostTensor>> = node.inputs.iter().map(|i| graph.constants.get(i).map(|t| &**t)).collect();
             match eval::eval(&node, &ins) {
                 Ok(outs) => {
@@ -269,6 +278,8 @@ pub fn pretranspose_weights(graph: &mut Graph) -> Result<usize> {
                             let flat = t.reshaped(vec![c, m * k])?;
                             new_consts.push((tname.clone(), transpose(&flat, &[1, 0])?));
                         }
+                        // Preserve the optional ONNX bias slot before adding private inputs.
+                        node.inputs.resize(3, String::new());
                         node.inputs.push(tname);
                         node.set_attr_i("__w_prepacked", 1);
                         n += 1;
@@ -311,7 +322,10 @@ pub fn prune_constants(graph: &mut Graph) {
     for o in &graph.outputs {
         used.insert(o.name.as_str());
     }
-    let used: HashSet<String> = used.into_iter().map(|s| s.to_owned()).collect();
+    let mut used: HashSet<String> = used.into_iter().map(|s| s.to_owned()).collect();
+    for node in &graph.nodes {
+        used.extend(node.captures());
+    }
     let before = graph.constants.len();
     graph.constants.retain(|k, _| used.contains(k));
     tracing::debug!(before, after = graph.constants.len(), "constants pruned");
@@ -452,7 +466,7 @@ mod tests {
     use crate::ir::{Attr, Node, ValueDesc};
 
     fn desc(name: &str) -> ValueDesc {
-        ValueDesc { name: name.into(), dtype: DType::F32, shape: vec![] }
+        ValueDesc { sequence: false, name: name.into(), dtype: DType::F32, shape: vec![] }
     }
 
     #[test]

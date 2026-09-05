@@ -157,6 +157,7 @@ pub fn layer_norm(x: &HostTensor, scale: &HostTensor, bias: Option<&HostTensor>,
 
 #[derive(Clone, Debug)]
 pub struct ConvAttrs {
+    pub output_padding: usize,
     pub stride: usize,
     pub pad_left: usize,
     pub pad_right: usize,
@@ -175,7 +176,20 @@ impl ConvAttrs {
         if node.attr_str("auto_pad").is_some_and(|p| p != "NOTSET") {
             return Err(Error::unsupported(format!("{node}: auto_pad")));
         }
+        let output_padding = node.attr_ints("output_padding").unwrap_or_else(|| vec![0]);
+        if strides[0] <= 0
+            || dil[0] <= 0
+            || output_padding.len() != 1
+            || output_padding[0] < 0
+            || output_padding[0] >= strides[0].max(dil[0])
+        {
+            return Err(Error::shape("convolution stride/dilation/output_padding"));
+        }
+        if node.attrs.contains_key("output_shape") {
+            return Err(Error::unsupported("ConvTranspose output_shape"));
+        }
         Ok(ConvAttrs {
+            output_padding: output_padding[0] as usize,
             stride: strides[0] as usize,
             pad_left: pads[0] as usize,
             pad_right: pads[1] as usize,
@@ -238,7 +252,7 @@ pub fn conv_transpose1d(x: &HostTensor, w: &HostTensor, bias: Option<&HostTensor
     }
     let m = mg * a.group;
     let cg = c / a.group;
-    let full = (l - 1) * a.stride + a.dilation * (k - 1) + 1;
+    let full = (l - 1) * a.stride + a.dilation * (k - 1) + 1 + a.output_padding;
     let l_out = full.saturating_sub(a.pad_left + a.pad_right);
     let xv = x.as_f32();
     let wv = w.as_f32();
@@ -306,17 +320,17 @@ mod tests {
     fn conv_and_transpose() {
         let x = HostTensor::f32(vec![1, 1, 4], vec![1., 2., 3., 4.]);
         let w = HostTensor::f32(vec![1, 1, 2], vec![1., 1.]);
-        let a = ConvAttrs { stride: 1, pad_left: 0, pad_right: 0, dilation: 1, group: 1 };
+        let a = ConvAttrs { output_padding: 0, stride: 1, pad_left: 0, pad_right: 0, dilation: 1, group: 1 };
         let y = conv1d(&x, &w, None, &a).unwrap();
         assert_eq!(y.as_f32().to_vec(), vec![3., 5., 7.]);
         let wt = HostTensor::f32(vec![1, 1, 2], vec![1., 1.]);
-        let a2 = ConvAttrs { stride: 2, pad_left: 0, pad_right: 0, dilation: 1, group: 1 };
+        let a2 = ConvAttrs { output_padding: 0, stride: 2, pad_left: 0, pad_right: 0, dilation: 1, group: 1 };
         let y = conv_transpose1d(&HostTensor::f32(vec![1, 1, 2], vec![1., 2.]), &wt, None, &a2).unwrap();
         assert_eq!(y.as_f32().to_vec(), vec![1., 1., 2., 2.]);
         // depthwise transposed conv: two channels, group 2
         let x2 = HostTensor::f32(vec![1, 2, 1], vec![1., 10.]);
         let w2 = HostTensor::f32(vec![2, 1, 2], vec![1., 2., 3., 4.]);
-        let a3 = ConvAttrs { stride: 2, pad_left: 0, pad_right: 0, dilation: 1, group: 2 };
+        let a3 = ConvAttrs { output_padding: 0, stride: 2, pad_left: 0, pad_right: 0, dilation: 1, group: 2 };
         let y = conv_transpose1d(&x2, &w2, None, &a3).unwrap();
         assert_eq!(y.shape, vec![1, 2, 2]);
         assert_eq!(y.as_f32().to_vec(), vec![1., 2., 30., 40.]);

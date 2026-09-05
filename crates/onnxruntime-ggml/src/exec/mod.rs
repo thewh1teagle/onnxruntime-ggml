@@ -19,6 +19,8 @@ pub mod fusion;
 pub mod ggml;
 pub mod input;
 pub mod ops_binary;
+pub mod ops_extra;
+pub mod ops_lstm;
 pub mod ops_nn;
 pub mod ops_shape;
 pub mod profile;

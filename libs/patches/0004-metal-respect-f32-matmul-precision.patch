@@ -1,0 +1,91 @@
+metal: honor GGML_PREC_F32 for f32 matrix multiplication
+
+The default simdgroup kernel stages both operands in half precision, including
+f32 input tensors. Keep that fast default, but select float tiles for explicit
+GGML_PREC_F32 requests. This also supplies the precise simdgroup path on devices
+with tensor API support. Shared memory offsets and allocation follow tile types.
+
+diff --git a/src/ggml-metal/ggml-metal-device.cpp b/src/ggml-metal/ggml-metal-device.cpp
+index 4036cc2..2ded555 100644
+--- a/src/ggml-metal/ggml-metal-device.cpp
++++ b/src/ggml-metal/ggml-metal-device.cpp
+@@ -749,7 +749,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     constexpr int NRA = SZ_SIMDGROUP * N_MM_BLOCK_Y * N_MM_SIMD_GROUP_Y;
+     constexpr int NRB = SZ_SIMDGROUP * N_MM_BLOCK_X * N_MM_SIMD_GROUP_X;
+ 
+-    const bool has_tensor = ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_tensor;
++    const bool precise = tsrc0 == GGML_TYPE_F32 && tsrc1 == GGML_TYPE_F32 &&
++        ggml_get_op_params_i32(op, 0) == GGML_PREC_F32;
++
++    const bool has_tensor = !precise && ggml_metal_device_get_props(ggml_metal_library_get_device(lib))->has_tensor;
+ 
+     const bool bc_out = has_tensor
+         ? (op->ne[0] % NRA != 0 || op->ne[1] % NRB != 0)
+@@ -761,7 +764,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+     const int16_t r2   = (int16_t) (ne12 / op->src[0]->ne[2]);
+     const int16_t r3   = (int16_t) (ne13 / op->src[0]->ne[3]);
+ 
+-    snprintf(base, 256, "kernel_mul_mm_%s_%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1));
++    snprintf(base, 256, "kernel_mul_mm_%s_%s%s", ggml_type_name(tsrc0), ggml_type_name(tsrc1), precise ? "_precise" : "");
+     snprintf(name, 256, "%s_bci=%d_bco=%d_ne12=%d_ne13=%d_r2=%d_r3=%d",
+              base, bc_inp, bc_out, ne12, ne13, r2, r3);
+ 
+@@ -791,7 +794,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm(ggml_meta
+         res.nr0 = 64;
+         res.nr1 = 32;
+ 
+-        res.smem = bc_out ? 8192 : (4096 + 2048);
++        res.smem = precise ? (8192 + 4096) : (bc_out ? 8192 : (4096 + 2048));
+     }
+ 
+     res.nsg = N_MM_SIMD_GROUP_X * N_MM_SIMD_GROUP_Y;
+diff --git a/src/ggml-metal/kernels/mul_mm.metal b/src/ggml-metal/kernels/mul_mm.metal
+index ee848ee..24cfede 100644
+--- a/src/ggml-metal/kernels/mul_mm.metal
++++ b/src/ggml-metal/kernels/mul_mm.metal
+@@ -140,14 +140,15 @@ kernel void kernel_mul_mm(
+     cT.store(tD.slice(ra, rb));
+ }
+ 
+-#else
++#endif // GGML_METAL_HAS_TENSOR
+ 
++// Also available on tensor-capable devices when exact f32 tiles are requested.
+ template<
+     typename S0, typename S0_4x4, typename S0_8x8,
+     typename S1, typename S1_2x4, typename S1_8x8,
+     typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &),
+     typename T0, typename T0_4x4, typename T1, typename T1_2x4>
+-kernel void kernel_mul_mm(
++kernel void kernel_mul_mm_simd(
+         constant ggml_metal_kargs_mul_mm & args,
+         device const char * src0,
+         device const char * src1,
+@@ -158,7 +159,7 @@ kernel void kernel_mul_mm(
+         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+ 
+     threadgroup S0 * sa = (threadgroup S0 *)(shmem);
+-    threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
++    threadgroup S1 * sb = (threadgroup S1 *)(shmem + 64*32*sizeof(S0));
+ 
+     constexpr int NR0 = 64;
+     constexpr int NR1 = 32;
+@@ -357,7 +358,9 @@ kernel void kernel_mul_mm(
+     }
+ }
+ 
+-#endif // GGML_METAL_HAS_TENSOR
++#ifndef GGML_METAL_HAS_TENSOR
++#define kernel_mul_mm kernel_mul_mm_simd
++#endif
+ 
+ template<short ne20> // n_expert_used
+ kernel void kernel_mul_mm_id_map0(
+@@ -736,6 +739,7 @@ kernel void kernel_mul_mm_id(
+ 
+ typedef decltype(kernel_mul_mm<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>) mul_mm_t;
+ 
++template [[host_name("kernel_mul_mm_f32_f32_precise")]] kernel mul_mm_t kernel_mul_mm_simd<float, float4x4, simdgroup_float8x8, float, float2x4, simdgroup_float8x8, float4x4, 1, dequantize_f32, float, float4x4, float, float2x4>;
+ template [[host_name("kernel_mul_mm_f32_f32")]]     kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   float4x4,      1,     dequantize_f32,     float,  float4x4,  float, float2x4>;
+ template [[host_name("kernel_mul_mm_f16_f32")]]     kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   half4x4,       1,     dequantize_f16,     half,   half4x4,   float, float2x4>;
+ #if defined(GGML_METAL_HAS_BF16)
