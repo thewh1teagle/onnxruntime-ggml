@@ -43,7 +43,11 @@ print("library", ggml.library_path())
 rng = np.random.default_rng(0)
 feeds = {n: rng.standard_normal((2, 3), dtype=np.float32) for n in ("a", "b", "c")}
 
-ggml_out = ggml.InferenceSession(model).run(None, feeds)[0]
+so = ort.SessionOptions()
+so.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+session = ggml.InferenceSession(model, sess_options=so)
+session.disable_fallback()
+ggml_out = session.run(None, feeds)[0]
 cpu_out = ort.InferenceSession(model, providers=["CPUExecutionProvider"]).run(None, feeds)[0]
 
 if ggml_out.shape != cpu_out.shape:
