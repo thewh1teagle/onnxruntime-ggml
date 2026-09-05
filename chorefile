@@ -10,7 +10,7 @@ include libs/libs.chore
 
 repo=thewh1teagle/onnxruntime-ggml
 lib_dir=python/onnxruntime_ggml/lib
-models_tag=models-v1
+models_tag=models-v2
 model_name=pocket-tts-english-fp32.onnx
 
 # Print the platform id used in release asset names, e.g. darwin-arm64.
@@ -171,32 +171,28 @@ task release version {
     echo "release v$1 created; the Release workflow uploads the libraries and wheels"
 }
 
-# Build one wheel per platform from the release archives: wheels <version> [out].
+# Download all four wheels already built and tested on their target platforms.
 task wheels version out=dist/wheels {
     mkdir $2
-    for platform in darwin-arm64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-amd64 {
-        asset=onnxruntime-ggml-$1-$platform.tar.gz
-        if !exists dist/$asset {
-            mkdir dist
-            try download gh://$repo/v$1/$asset dist/$asset --timeout 300
-        }
-        if exists dist/$asset {
-            wheel-for $1 $platform dist/$asset $2
-        } else {
-            echo "no $asset on release v$1, skipping $platform"
-        }
+    gh release download v$1 --pattern "*.whl" --dir $2 --clobber
+    env WHEEL_DIR $2
+    env RELEASE_VERSION $1
+    script uv run --no-project python - {
+        import os
+        from pathlib import Path
+        wheels = list(Path(os.environ["WHEEL_DIR"]).glob(f"onnxruntime_ggml-{os.environ['RELEASE_VERSION']}-*.whl"))
+        assert len(wheels) == 4, f"expected four platform wheels, found {len(wheels)}"
     }
-    echo "wheels in $2:"
-    for w in $(find $2 *.whl) { echo "  $w" }
+    echo "downloaded four tested wheels to $2"
 }
 
 # Build the wheel for one platform from a library archive: wheel-for <version> <platform> <archive> <out>.
 task wheel-for version platform archive out {
     tag=""
-    if $2 == darwin-arm64 { tag=macosx_11_0_arm64 }
-    else if $2 == darwin-x86_64 { tag=macosx_10_15_x86_64 }
-    else if $2 == linux-x86_64 { tag=manylinux_2_28_x86_64 }
-    else if $2 == linux-aarch64 { tag=manylinux_2_28_aarch64 }
+    if $2 == darwin-arm64 { tag=macosx_14_0_arm64 }
+    else if $2 == darwin-x86_64 { tag=macosx_12_0_x86_64 }
+    else if $2 == linux-x86_64 { tag=manylinux_2_35_x86_64 }
+    else if $2 == linux-aarch64 { tag=manylinux_2_39_aarch64 }
     else if $2 == windows-amd64 { tag=win_amd64 }
     else { fail "unknown platform $2" }
     mkdir $4
@@ -209,7 +205,13 @@ task wheel-for version platform archive out {
     for w in $(find python/dist *.whl) {
         uvx --from wheel wheel tags --python-tag py3 --abi-tag none --platform-tag $tag --remove $w
     }
-    for w in $(find python/dist *.whl) { move $w $4/ }
+    for w in $(find python/dist *.whl) {
+        if $2 == linux-x86_64 || $2 == linux-aarch64 {
+            # Bundle non-policy shared libraries such as libgomp and verify the
+            # GLIBC/GLIBCXX symbol baseline before publishing a manylinux tag.
+            uvx --from auditwheel auditwheel repair --plat $tag --wheel-dir $4 $w
+        } else { move $w $4/ }
+    }
     remove $lib_dir
     mkdir $lib_dir
     write $lib_dir/.gitkeep ""

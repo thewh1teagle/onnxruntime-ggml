@@ -1,89 +1,128 @@
 name: Release
 
-# `chore release <version>` tags v<version> and creates the GitHub release; this
-# workflow builds the provider library on every platform, attaches the
-# archives, then builds one wheel per platform and attaches those too.
-# Set the PYPI_API_TOKEN secret (or configure trusted publishing) to publish.
-
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build, e.g. 0.1.0 (release v<version> must exist)"
+        description: "Version to build (release v<version> must exist)"
         required: true
 
 permissions:
   contents: write
 
 jobs:
-  libs:
+  wheels:
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: macos-14
             platform: darwin-arm64
-          - runner: macos-15-intel
-            platform: darwin-x86_64
           - runner: ubuntu-22.04
             platform: linux-x86_64
-          - runner: ubuntu-22.04-arm
+          - runner: ubuntu-24.04-arm
             platform: linux-aarch64
           - runner: windows-2022
             platform: windows-amd64
     runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.platform }} wheel
     steps:
+      - name: Version
+        id: v
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          v="${REQUESTED_VERSION:-${GITHUB_REF_NAME#v}}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        with:
+          ref: v${{ steps.v.outputs.version }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - uses: getchore/setup-chore@v1
-      - name: Version
-        id: v
+      - uses: astral-sh/setup-uv@v5
+      - name: Install wheel repair tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y patchelf
+      - name: Verify package version
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.v.outputs.version }}
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then v="${{ github.event.inputs.version }}"; else v="${GITHUB_REF_NAME#v}"; fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
+          uv run --no-project --python 3.12 python -c 'import os, tomllib; assert tomllib.load(open("python/pyproject.toml", "rb"))["project"]["version"] == os.environ["RELEASE_VERSION"]'
       - name: Fetch ggml libraries
         run: chore headers && chore fetch-libs
-      - name: Build and package
-        run: chore package-lib ${{ steps.v.outputs.version }}
-      - name: Upload to the release
+      - name: Build provider and wheel
+        run: |
+          chore package-lib ${{ steps.v.outputs.version }}
+          chore wheel-for ${{ steps.v.outputs.version }} ${{ matrix.platform }} dist/onnxruntime-ggml-${{ steps.v.outputs.version }}-${{ matrix.platform }}.tar.gz dist/wheels
+      - name: Install and test the wheel
+        shell: bash
+        run: |
+          uv venv --python 3.12 .wheel-test
+          if [ "$RUNNER_OS" = Windows ]; then py=.wheel-test/Scripts/python.exe; else py=.wheel-test/bin/python; fi
+          uv pip install --python "$py" dist/wheels/*.whl
+          "$py" -m onnxruntime_ggml
+          uv run tests/test_wheel.py "$py"
+      - name: Upload tested release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload v${{ steps.v.outputs.version }} dist/onnxruntime-ggml-${{ steps.v.outputs.version }}-${{ matrix.platform }}.tar.gz --clobber
+        run: gh release upload v${{ steps.v.outputs.version }} dist/onnxruntime-ggml-${{ steps.v.outputs.version }}-${{ matrix.platform }}.tar.gz dist/wheels/*.whl --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: dist/wheels/*.whl
+          if-no-files-found: error
 
-  wheels:
-    needs: libs
-    # Build wheels for every platform that did build; a missing archive is skipped.
-    if: ${{ !cancelled() }}
+  intel-library:
+    # ONNX Runtime 1.29 has no Intel macOS Python wheel. Keep the provider
+    # available for applications supplying their own compatible runtime.
+    runs-on: macos-15-intel
+    steps:
+      - name: Version
+        id: v
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          v="${REQUESTED_VERSION:-${GITHUB_REF_NAME#v}}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ steps.v.outputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - uses: getchore/setup-chore@v1
+      - run: chore headers && chore fetch-libs
+      - run: chore package-lib ${{ steps.v.outputs.version }}
+      - name: Upload native library
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload v${{ steps.v.outputs.version }} dist/onnxruntime-ggml-${{ steps.v.outputs.version }}-darwin-x86_64.tar.gz --clobber
+
+  publish:
+    needs: [wheels, intel-library]
     runs-on: ubuntu-22.04
-    # A step cannot read `secrets` from its own `if`, and a step-level `env` is not
-    # in scope for that step's `if` either. Deciding once here, at job level, is the
-    # way to make publishing conditional on the secret being set.
     env:
       HAS_PYPI: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: getchore/setup-chore@v1
       - uses: astral-sh/setup-uv@v5
-      - name: Version
-        id: v
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/wheels
+          merge-multiple: true
+      - name: Require all four wheels
         shell: bash
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then v="${{ github.event.inputs.version }}"; else v="${GITHUB_REF_NAME#v}"; fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-      - name: Build wheels from the release archives
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: chore wheels ${{ steps.v.outputs.version }}
-      - name: Upload wheels to the release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: for w in dist/wheels/*.whl; do gh release upload v${{ steps.v.outputs.version }} "$w" --clobber; done
+          count=$(find dist/wheels -name '*.whl' | wc -l)
+          test "$count" -eq 4
       - name: Publish to PyPI
         if: env.HAS_PYPI == 'true'
         env:

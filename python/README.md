@@ -2,6 +2,16 @@
 
 An onnxruntime execution provider that runs ONNX models on ggml's Metal, Vulkan and CPU kernels.
 
+```console
+uv pip install onnxruntime-ggml
+```
+
+Requires Python 3.11 or newer.
+
+The wheel includes the native provider and installs a compatible onnxruntime.
+Supports macOS 14+ (Apple silicon), Linux x86_64 (glibc 2.35+) and aarch64
+(glibc 2.39+), and Windows x64. No compiler or separate ggml installation is needed.
+
 ```python
 import onnxruntime_ggml as ggml
 

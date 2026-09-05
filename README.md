@@ -30,25 +30,24 @@ session = ggml.InferenceSession("pocket-tts-english.onnx")
 
 ## Install
 
-Wheels are attached to each [GitHub release](https://github.com/thewh1teagle/onnxruntime-ggml/releases), one per platform, with the native provider inside. Pick yours and install it by URL:
+Install the package and its bundled native provider into a virtual environment:
 
 ```console
-# in a project
-uv add "onnxruntime-ggml @ https://github.com/thewh1teagle/onnxruntime-ggml/releases/download/v0.1.1/onnxruntime_ggml-0.1.1-py3-none-macosx_11_0_arm64.whl"
-
-# into a venv
-uv pip install https://github.com/thewh1teagle/onnxruntime-ggml/releases/download/v0.1.1/onnxruntime_ggml-0.1.1-py3-none-macosx_11_0_arm64.whl
+uv pip install onnxruntime-ggml
 ```
 
-| Platform | Wheel |
-|---|---|
-| macOS Apple silicon | `onnxruntime_ggml-0.1.1-py3-none-macosx_11_0_arm64.whl` |
-| macOS Intel | `onnxruntime_ggml-0.1.1-py3-none-macosx_10_15_x86_64.whl` |
-| Linux x86_64 | `onnxruntime_ggml-0.1.1-py3-none-manylinux_2_28_x86_64.whl` |
-| Linux aarch64 | `onnxruntime_ggml-0.1.1-py3-none-manylinux_2_28_aarch64.whl` |
-| Windows x64 | `onnxruntime_ggml-0.1.1-py3-none-win_amd64.whl` |
+Requires Python 3.11 or newer.
 
-They need onnxruntime 1.29 or later, which `uv` pulls in. Once the package is on PyPI this becomes `uv add onnxruntime-ggml`.
+In a uv project, use `uv add onnxruntime-ggml`. The matching wheel and compatible
+onnxruntime dependency are selected automatically; no Rust build or separate
+ggml download is required.
+
+Wheels support macOS 14+ on Apple silicon, Linux with glibc 2.35+ on
+x86_64 or glibc 2.39+ on aarch64, and Windows x64. Linux wheels bundle additional
+runtime libraries and are checked with auditwheel. GPU execution needs a working
+Metal or Vulkan device; CPU execution is also available. Intel macOS has a native
+library release asset for applications providing a compatible ONNX Runtime;
+there is no Intel macOS Python wheel.
 
 From a checkout instead (needs Rust and [chore](https://github.com/getchore/chore); nothing else is compiled, ggml comes prebuilt):
 
@@ -71,7 +70,16 @@ session = ort.InferenceSession("model.onnx", so)
 
 ## Status
 
-Targets [pocket-tts](https://github.com/thewh1teagle/pocket-tts-onnx) today: 38 ONNX op types, opset 17, fp32, every output matching onnxruntime's CPU provider (`chore compare`). Correct first, fast next: a frame step is one ggml graph of ~2000 small ops, so the GPU path is not yet faster than the CPU provider on this autoregressive model. Attention and norm fusion, a device-resident KV cache and quantized (`MatMulInteger`) weights are the next steps; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Validated with Pocket-TTS, Whisper and Kokoro. Generic recurrent, control-flow,
+sequence, resize and indexing operators extend the provider beyond the original
+Pocket-TTS graph; [architecture notes](docs/ARCHITECTURE.md) describe supported
+subsets and host placement.
+
+On Apple M4 Pro, FP32 Kokoro inference measured 0.577 s median with ggml versus
+1.161 s with ONNX Runtime CPU, using seven threads and seven measured runs after
+warmup. All 2,138 optimized nodes were claimed with CPU EP fallback disabled;
+some operations still run inside ggml's CPU backend or the provider's host
+interpreter. Performance depends on the model and hardware.
 
 ## Develop
 
