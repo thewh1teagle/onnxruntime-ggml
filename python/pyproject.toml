@@ -1,6 +1,6 @@
 [project]
 name = "onnxruntime-ggml"
-version = "0.1.1"
+version = "0.2.0"
 description = "An onnxruntime execution provider that runs ONNX models on ggml (Metal, Vulkan, CPU)"
 readme = "README.md"
 license = "MIT"
