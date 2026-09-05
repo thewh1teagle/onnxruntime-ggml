@@ -40,10 +40,12 @@ In a uv project, use `uv add onnxruntime-ggml`. The matching wheel and compatibl
 onnxruntime dependency are selected automatically; no Rust build or separate
 ggml download is required.
 
-Wheels support macOS 12+ on Apple silicon and Intel, Linux with glibc 2.35+ on
+Wheels support macOS 14+ on Apple silicon, Linux with glibc 2.35+ on
 x86_64 or glibc 2.39+ on aarch64, and Windows x64. Linux wheels bundle additional
 runtime libraries and are checked with auditwheel. GPU execution needs a working
-Metal or Vulkan device; CPU execution is also available.
+Metal or Vulkan device; CPU execution is also available. Intel macOS has a native
+library release asset for applications providing a compatible ONNX Runtime;
+there is no Intel macOS Python wheel.
 
 From a checkout instead (needs Rust and [chore](https://github.com/getchore/chore); nothing else is compiled, ggml comes prebuilt):
 

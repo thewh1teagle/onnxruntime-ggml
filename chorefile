@@ -171,7 +171,7 @@ task release version {
     echo "release v$1 created; the Release workflow uploads the libraries and wheels"
 }
 
-# Download all five wheels already built and tested on their target platforms.
+# Download all four wheels already built and tested on their target platforms.
 task wheels version out=dist/wheels {
     mkdir $2
     gh release download v$1 --pattern "*.whl" --dir $2 --clobber
@@ -181,15 +181,15 @@ task wheels version out=dist/wheels {
         import os
         from pathlib import Path
         wheels = list(Path(os.environ["WHEEL_DIR"]).glob(f"onnxruntime_ggml-{os.environ['RELEASE_VERSION']}-*.whl"))
-        assert len(wheels) == 5, f"expected five platform wheels, found {len(wheels)}"
+        assert len(wheels) == 4, f"expected four platform wheels, found {len(wheels)}"
     }
-    echo "downloaded five tested wheels to $2"
+    echo "downloaded four tested wheels to $2"
 }
 
 # Build the wheel for one platform from a library archive: wheel-for <version> <platform> <archive> <out>.
 task wheel-for version platform archive out {
     tag=""
-    if $2 == darwin-arm64 { tag=macosx_12_0_arm64 }
+    if $2 == darwin-arm64 { tag=macosx_14_0_arm64 }
     else if $2 == darwin-x86_64 { tag=macosx_12_0_x86_64 }
     else if $2 == linux-x86_64 { tag=manylinux_2_35_x86_64 }
     else if $2 == linux-aarch64 { tag=manylinux_2_39_aarch64 }

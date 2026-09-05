@@ -8,20 +8,20 @@ chore release 0.1.0
 
 It sets the version in `Cargo.toml`, `python/pyproject.toml` and the Python package, commits, tags `v0.1.0`, pushes, and creates the GitHub release. The `Release` workflow then:
 
-1. builds the provider and wheel on macOS arm64, macOS x86_64, Linux x86_64, Linux aarch64 and Windows x64;
+1. builds the provider and wheel on macOS arm64, Linux x86_64, Linux aarch64 and Windows x64; an additional job builds the Intel macOS native library;
 2. repairs Linux wheels with auditwheel, installs each wheel into a fresh virtual environment on its target platform, and runs inference with CPU EP fallback disabled;
 3. attaches the tested native archives and wheels to the GitHub release;
-4. publishes all five wheels to PyPI when every platform passes and the `PYPI_API_TOKEN` secret is set.
+4. publishes all four wheels to PyPI when every platform passes and the `PYPI_API_TOKEN` secret is set.
 
 ## By hand
 
 ```console
 chore package-lib 0.1.0             # this machine's archive into dist/
-chore wheels 0.1.0                  # download all five tested release wheels
+chore wheels 0.1.0                  # download all four tested release wheels
 chore publish 0.1.0                 # publish the tested release wheels to PyPI
 ```
 
-`chore wheels` downloads the five tested wheels from the release and fails if the set is incomplete. Linux wheels must be built and repaired on their target architecture; the release workflow handles that automatically.
+`chore wheels` downloads the four tested wheels from the release and fails if the set is incomplete. Linux wheels must be built and repaired on their target architecture; the release workflow handles that automatically.
 
 To build a single wheel from one archive:
 
@@ -46,11 +46,12 @@ uv run tests/test_wheel.py /tmp/ggml-wheel-test/bin/python
 
 | platform | wheel tag |
 |---|---|
-| darwin-arm64 | `macosx_12_0_arm64` |
-| darwin-x86_64 | `macosx_12_0_x86_64` |
+| darwin-arm64 | `macosx_14_0_arm64` |
 | linux-x86_64 | `manylinux_2_35_x86_64` |
 | linux-aarch64 | `manylinux_2_39_aarch64` |
 | windows-amd64 | `win_amd64` |
+
+Intel macOS has a native library asset but no Python wheel because ONNX Runtime 1.29 does not distribute an Intel macOS wheel. Python installation on macOS requires macOS 14+ on Apple silicon.
 
 The wheel is pure Python plus one native library, tagged `py3-none-<platform>`. It pins `onnxruntime>=1.29,<1.31`: the plugin API version is checked at load and a mismatch fails early with a clear message.
 
