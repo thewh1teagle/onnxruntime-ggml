@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #   "numpy>=1.26",
 #   "onnxruntime>=1.29,<1.31",

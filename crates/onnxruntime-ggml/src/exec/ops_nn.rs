@@ -61,7 +61,7 @@ fn mul_mat(run: &mut Run, a_nk: DeviceTensor, b_mk: DeviceTensor) -> Result<Devi
             target.extend([n, k]);
             a = ggml::repeat_to(ctx, a, &target)?;
         }
-        let t = g::ggml_mul_mat(ctx, a.t, b.t);
+        let t = ggml::mul_mat(ctx, a.t, b.t);
         let mut shape = batch;
         shape.extend([m, n]);
         Ok(dev(t, &shape))
@@ -153,7 +153,8 @@ fn conv(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> 
         // *folding* of its ONNX shape, which drops size-1 dims, and im2col reads
         // ne[0..2] as (L, C) on the input and (K, C) on the kernel.
         let mut xin = ggml::reshape(ctx, x, &[n, c, l])?;
-        if attrs.pad_left > 0 || attrs.pad_right > 0 {
+        let symmetric = attrs.pad_left == attrs.pad_right;
+        if !symmetric && (attrs.pad_left > 0 || attrs.pad_right > 0) {
             let t = g::ggml_pad_ext(ctx, xin.t, attrs.pad_left as i32, attrs.pad_right as i32, 0, 0, 0, 0, 0, 0);
             xin = dev(t, &[n, c, l + attrs.pad_left + attrs.pad_right]);
         }
@@ -167,7 +168,8 @@ fn conv(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> 
             "conv im2col"
         );
         let span = attrs.dilation * (k - 1) + 1;
-        let l_out = (xin.shape[2]).saturating_sub(span) / attrs.stride + 1;
+        let padding = if symmetric { attrs.pad_left } else { 0 };
+        let l_out = (xin.shape[2] + 2 * padding).saturating_sub(span) / attrs.stride + 1;
         // im2col: ne = [C*K, L_out, N]
         let cols = g::ggml_im2col(
             ctx,
@@ -175,7 +177,7 @@ fn conv(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> 
             xin.t,
             attrs.stride as i32,
             0,
-            0,
+            padding as i32,
             0,
             attrs.dilation as i32,
             0,
@@ -184,9 +186,11 @@ fn conv(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<DeviceTensor> 
         );
         let cols2 = g::ggml_reshape_2d(ctx, cols, (c * k) as i64, (l_out * n) as i64);
         let w2 = g::ggml_reshape_2d(ctx, wk.t, (c * k) as i64, m as i64);
-        let mm = g::ggml_mul_mat(ctx, cols2, w2); // ne = [L_out*N, M]
-        let y = g::ggml_reshape_3d(ctx, mm, l_out as i64, m as i64, n as i64); // ONNX [N, M, L_out]
-        add_bias(run, dev(y, &[n, m, l_out]), bias)
+        // Keep the weight in src0 so backend matmul kernels reuse its rows.
+        let mm = ggml::mul_mat(ctx, w2, cols2); // ne = [M, L_out*N]
+        let y = dev(g::ggml_reshape_3d(ctx, mm, m as i64, l_out as i64, n as i64), &[n, l_out, m]);
+        let y = ggml::permute(ctx, y, &[0, 2, 1])?;
+        add_bias(run, y, bias)
     }
 }
 
@@ -197,9 +201,6 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
     }
     if attrs.group != 1 {
         return conv_transpose_depthwise(run, node, ins, &attrs);
-    }
-    if node.attr_ints("output_padding").is_some_and(|p| p.iter().any(|&v| v != 0)) {
-        return Err(Error::unsupported("ConvTranspose output_padding"));
     }
     let x = run.dev_f32(need(node, ins, 0)?)?;
     let w = run.dev_f32(need(node, ins, 1)?)?;
@@ -233,7 +234,7 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
             // out[m, t*s + k] += cols[t, m, k] for each k: K strided accumulates
             // (ggml_acc into a view of the output). ggml's own conv_transpose_1d
             // kernel is a naive loop, ten times slower for mimi's layers.
-            let full = (l - 1) * attrs.stride + k;
+            let full = (l - 1) * attrs.stride + k + attrs.output_padding;
             let f = std::mem::size_of::<f32>();
             let wt = if node.attr_i("__w_prepacked", 0) != 0 {
                 // [M*K, C] constant prepacked at compile: ne=[C, M*K] resident, no per-run copy
@@ -244,7 +245,7 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
             };
             let x2 = g::ggml_reshape_2d(ctx, contig(ctx, xin).t, l as i64, c as i64); // ne=[L, C]
             let xt = g::ggml_cont(ctx, g::ggml_transpose(ctx, x2)); // ne=[C, L]
-            let cols = g::ggml_mul_mat(ctx, wt, xt); // ne=[M*K, L]
+            let cols = ggml::mul_mat(ctx, wt, xt); // ne=[M*K, L]
             let cols3 = g::ggml_reshape_3d(ctx, cols, k as i64, m as i64, l as i64); // ne=[K, M, L]
             let perm = g::ggml_cont(ctx, g::ggml_permute(ctx, cols3, 2, 0, 1, 3)); // ne=[M, L, K]
             let zero = run.scalar(0.0)?;
@@ -264,6 +265,9 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
             }
             return add_bias(run, y, bias);
         }
+        if n != 1 {
+            return Err(Error::unsupported("native ggml ConvTranspose requires batch size one"));
+        }
         let t = g::ggml_conv_transpose_1d(ctx, wk.t, xin.t, attrs.stride as i32, 0, 1);
         // ggml's Metal conv_transpose_1d is far slower than its CPU kernel for these
         // sizes (5 ms vs well under 1 ms for mimi's layers); pin the node to the CPU
@@ -272,7 +276,9 @@ fn conv_transpose(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Devi
             g::ggml_backend_sched_set_tensor_backend(run.prog.backend.sched, t, run.prog.backend.cpu());
             tracing::trace!(node = %node, "conv_transpose pinned to the cpu backend");
         }
-        let full = (l - 1) * attrs.stride + k;
+        let full = (l - 1) * attrs.stride + k + attrs.output_padding;
+        let t =
+            if attrs.output_padding > 0 { g::ggml_pad_ext(ctx, t, 0, attrs.output_padding as i32, 0, 0, 0, 0, 0, 0) } else { t };
         let mut y = dev(t, &[n, m, full]);
         if attrs.pad_left > 0 || attrs.pad_right > 0 {
             let l_out = full.saturating_sub(attrs.pad_left + attrs.pad_right);
@@ -304,7 +310,7 @@ fn conv_transpose_depthwise(run: &mut Run, node: &Node, ins: &[Option<In>], attr
     let ctx = run.ctx;
     unsafe {
         let f = std::mem::size_of::<f32>();
-        let full = (l - 1) * attrs.stride + k;
+        let full = (l - 1) * attrs.stride + k + attrs.output_padding;
         let xin = contig(ctx, ggml::reshape(ctx, x, &[c, l])?); // ne=[L, C]
         let wk = contig(ctx, ggml::reshape(ctx, w, &[c, k])?); // ne=[K, C]
                                                                // x transposed to ne=[C, L] so a stride-s view over positions is expressible

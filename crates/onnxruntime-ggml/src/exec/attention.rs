@@ -76,7 +76,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
         };
         let final_ = if mode == Attention::Matmul {
             // scores[T,S] = Q·Kᵀ: a = K rows of length D (ne=[D,S,H,B]), b = Q (ne=[D,T,H,B]) -> ne=[S,T,H,B]
-            let scores = g::ggml_mul_mat(ctx, kg.t, qg.t);
+            let scores = ggml::mul_mat(ctx, kg.t, qg.t);
             let mask_t = match &mask_host {
                 Some(m) => run.upload_raw(DType::F32, &[t, s], m.to_bytes(DType::F32)?, "attn_mask")?.t,
                 None => std::ptr::null_mut(),
@@ -84,7 +84,7 @@ pub fn emit(run: &mut Run, node: &Node, ins: &[Option<In>]) -> Result<Vec<Value>
             let p = g::ggml_soft_max_ext(ctx, scores, mask_t, scale, 0.0);
             // out[T,D] = P·V: a = Vᵀ rows of length S (ne=[S,D,H,B]), b = P (ne=[S,T,H,B]) -> ne=[D,T,H,B] = [B,H,T,D]
             let vt = contig(ctx, ggml::permute(ctx, vg, &[0, 1, 3, 2])?);
-            let out = g::ggml_mul_mat(ctx, vt.t, p);
+            let out = ggml::mul_mat(ctx, vt.t, p);
             tracing::trace!(node = %node, b, h, t, s, d, scale, masked = mask_in.is_some(), "attention (matmul path)");
             let res = dev(out, &[b, h, t, d]);
             if rank == 4 {

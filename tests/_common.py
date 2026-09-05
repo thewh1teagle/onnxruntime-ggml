@@ -44,6 +44,7 @@ def sessions(model, options=None):
     cpu = ort.InferenceSession(model, so, providers=["CPUExecutionProvider"])
     gso = ort.SessionOptions()
     gso.log_severity_level = 2
+    gso.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
     g = ggml.InferenceSession(model, options, sess_options=gso)
     return cpu, g
 

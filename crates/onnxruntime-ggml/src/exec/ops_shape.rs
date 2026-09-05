@@ -11,7 +11,7 @@ use crate::exec::value::{DeviceTensor, Value};
 use crate::host::broadcast::broadcast_shapes;
 use crate::host::eval::norm_axis;
 use crate::host::eval_shape::{resolve_reshape, slice_plan, squeeze_shape, unsqueeze_shape};
-use crate::ir::{DType, Node};
+use crate::ir::Node;
 
 fn need<'a>(node: &Node, ins: &'a [Option<In>], i: usize) -> Result<&'a In> {
     ins.get(i).and_then(|x| x.as_ref()).ok_or_else(|| Error::model(format!("{node}: missing input {i}")))
@@ -207,7 +207,7 @@ fn gather_shape(data: &[usize], idx_shape: &[usize], axis: usize) -> Vec<usize> 
 /// Two Gather shapes ggml can serve: a single index (a strided view) and
 /// row lookup on a 2-D table (`ggml_get_rows`). Anything else is declined and
 /// the runtime evaluates it on the host.
-fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor, axis: usize) -> Result<DeviceTensor> {
+pub(crate) fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor, axis: usize) -> Result<DeviceTensor> {
     let ctx = run.ctx;
     let dim = x.shape[axis] as i64;
     // ONNX Gather replaces `axis` with the *whole* index shape. Index rank
@@ -247,6 +247,27 @@ fn gather(run: &mut Run, x: DeviceTensor, idx: &crate::host::tensor::HostTensor,
         let t = unsafe { g::ggml_get_rows(ctx, x.t, id.t) };
         return unsafe { fold::reshape_logical(ctx, dev(t, &[ids.len(), cols]), &out_shape) };
     }
-    let _ = DType::I32;
-    Err(Error::unsupported(format!("gather axis {axis} on rank {} with {} indices", x.rank, idx.numel())))
+    // Put the selected axis first, flatten the other axes into each row, then
+    // restore the original axis order. This works for arbitrary index shapes.
+    let shape = x.shape();
+    let outer: usize = shape[..axis].iter().product();
+    let inner: usize = shape[axis + 1..].iter().product();
+    if dim > i32::MAX as i64 || idx.numel() == 0 {
+        return Err(Error::unsupported("empty/oversized gather"));
+    }
+    let ids: Vec<i64> = idx.as_i64().iter().map(|&v| if v < 0 { v + dim } else { v }).collect();
+    if ids.iter().any(|&v| v < 0 || v >= dim) {
+        return Err(Error::shape("gather index out of range"));
+    }
+    let ids = run
+        .upload(&crate::host::tensor::HostTensor::i32(vec![ids.len()], ids.iter().map(|&v| v as i32).collect()), "gather_idx")?;
+    unsafe {
+        let flat = ggml::reshape(ctx, contig(ctx, x), &[outer, dim as usize, inner])?;
+        let rows = contig(ctx, ggml::permute(ctx, flat, &[1, 0, 2])?);
+        let rows = ggml::reshape(ctx, rows, &[dim as usize, outer * inner])?;
+        let selected = dev(g::ggml_get_rows(ctx, rows.t, ids.t), &[idx.numel(), outer, inner]);
+        let selected = ggml::reshape(ctx, selected, &[idx.numel(), outer, inner])?;
+        let ordered = contig(ctx, ggml::permute(ctx, selected, &[1, 0, 2])?);
+        fold::reshape_logical(ctx, ordered, &out_shape)
+    }
 }

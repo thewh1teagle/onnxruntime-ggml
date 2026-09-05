@@ -27,7 +27,8 @@ Inside `onnxruntime-ggml`:
 | `ir.rs` | the graph the compiler works on |
 | `host/` | host tensors and an interpreter for every supported ONNX op |
 | `exec/program.rs` | compile: constant folding, GELU fusion, weight pre-transpose, weight upload |
-| `exec/runtime.rs` | run: placement, uploads, flushes, readbacks |
+| `exec/runtime.rs`, `exec/transfer.rs` | run: placement, uploads, flushes, readbacks |
+| `exec/control.rs`, `host/eval_control.rs` | nested graphs, lexical captures, internal sequences and loop state |
 | `exec/sticky.rs` | graph inputs kept resident on the device between runs |
 | `exec/fold.rs` | logical shapes of any rank on 4-dimensional ggml tensors |
 | `exec/fusion.rs` | pattern fusions: GELU, decomposed LayerNorm |
@@ -76,11 +77,49 @@ and the node runs on the host, as before.
 
 ## What pocket-tts needs
 
-38 op types, opset 17, no control flow. 14 are pure shape math and fold or run on the host; 19 map directly to ggml; Conv/ConvTranspose go through im2col and `ggml_conv_transpose_1d`; the GELU subgraph is fused into `ggml_gelu_erf`. The 6-D KV-cache tensors stay on the device throughout, under a folded shape.
+The provider implements ONNX tensor, recurrent and control-flow operations with explicit subsets described below. Shape arithmetic folds or runs on the host; tensor operators use ggml when their shapes and attributes are supported. Conv/ConvTranspose use im2col or `ggml_conv_transpose_1d`; GELU, layer normalization and attention patterns are fused. Folded shapes keep higher-rank KV-cache tensors on the device.
+
+## Control flow and operator subsets
+
+The importer retains nested `Graph` attributes. Lexical captures participate in
+liveness and constant retention. The provider claims the parent graph before
+its control-flow subgraphs; `If`, `Loop` and sequence bookkeeping execute in the
+provider's host interpreter. Float results return to staged device placement.
+Sequence-valued external graph inputs/outputs are explicitly unsupported.
+
+`LSTM` lowers to ggml input/recurrent matrix products and standard gates. Forward,
+reverse and bidirectional traversal, sequence lengths, initial states, peepholes,
+clipping and coupled input/forget gates are supported. Custom activation lists
+are declined. Oversized recurrent graphs use the host reference.
+
+`Resize` implements nearest and linear interpolation with standard coordinate
+modes, scales or sizes. Cubic interpolation, antialiasing, axes subsets and
+non-stretch aspect-ratio policies are explicitly unsupported. Indexing, padding,
+normalization and scan implementations are general ONNX operations; they do not
+inspect model names or match model-specific tensor names.
+
+A node claimed by this EP is not necessarily a GPU kernel. Shape, integer,
+control-flow and some numerical operations use its host interpreter; ggml's
+scheduler can also choose its CPU backend. Disable ONNX Runtime CPU EP fallback
+with `session.disable_cpu_ep_fallback=1` to test provider coverage independently
+of those internal placement decisions. Debug logs include ggml backend placement.
+
+`RandomNormalLike` and `RandomUniformLike` use per-program streams that advance
+across runs. Explicit seeds reproduce streams across sessions. Random nodes are
+never constant-folded; their generator algorithm is not ORT's generator.
+
+Matrix emitters request f32 accumulation while weight storage follows `weights`.
+The bundled Metal patches preserve f32 tiles for explicit f32 matrix products
+and fix wide-row copies in non-inplace accumulation. The 1-D im2col kernel tiles
+contiguous output columns to avoid tiny per-channel threadgroups. Redundant
+reshape nodes are elided when the physical dimensions already match. Build the patched native
+bundle with `chore build-libs`, then install it with
+`ORT_GGML_LIBS_ARCHIVE=target/ggml-libs-darwin-arm64.tar.gz chore fetch-libs` on Apple
+Silicon before building the provider. `libs/revision` identifies the new bundle.
 
 ## Not yet
 
-- Attention fusion (`ggml_flash_attn_ext`), RoPE tables.
+- General ONNX coverage beyond the implemented operator subsets.
 - Zero-copy graph inputs: onnxruntime's input buffers are copied into
   `HostTensor`s before a run, which is ~6 ms per whisper decode step.
 - Quantized models (`DynamicQuantizeLinear` / `MatMulInteger` → ggml q8 matmul).

@@ -1,0 +1,79 @@
+metal: tile 1-D im2col by contiguous output columns
+
+The previous dispatch launched a threadgroup for every (input channel, output
+position), often with only 3-11 threads. Tile columns across channels instead,
+using the existing argument layout for arbitrary batch, stride and dilation.
+The 2-D path and f32/f16 output storage remain supported.
+
+diff --git a/src/ggml-metal/ggml-metal-device.cpp b/src/ggml-metal/ggml-metal-device.cpp
+index 2ded555..9f67d87 100644
+--- a/src/ggml-metal/ggml-metal-device.cpp
++++ b/src/ggml-metal/ggml-metal-device.cpp
+@@ -1869,7 +1869,9 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col(ggml_meta
+     char base[256];
+     char name[256];
+ 
+-    if (KH*KW <= 1024) {
++    if (!is_2D) {
++        snprintf(base, 256, "kernel_im2col_1d_%s", ggml_type_name(op->type));
++    } else if (KH*KW <= 1024) {
+         snprintf(base, 256, "kernel_im2col_%s", ggml_type_name(op->type));
+     } else {
+         snprintf(base, 256, "kernel_im2col_ext_%s", ggml_type_name(op->type));
+diff --git a/src/ggml-metal/ggml-metal-ops.cpp b/src/ggml-metal/ggml-metal-ops.cpp
+index 5668130..a0e2303 100644
+--- a/src/ggml-metal/ggml-metal-ops.cpp
++++ b/src/ggml-metal/ggml-metal-ops.cpp
+@@ -4204,7 +4204,14 @@ int ggml_metal_op_im2col(ggml_metal_op_t ctx, int idx) {
+ 
+     auto pipeline = ggml_metal_library_get_pipeline_im2col(lib, op);
+ 
+-    if (KH*KW <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {
++    if (!is_2D) {
++        const int nth = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
++        ggml_metal_encoder_set_pipeline(enc, pipeline);
++        ggml_metal_encoder_set_bytes(enc, &args, sizeof(args), 0);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(op->src[1]), 1);
++        ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(op), 2);
++        ggml_metal_encoder_dispatch_threadgroups(enc, (CHW + nth - 1)/nth, OW, N, nth, 1, 1);
++    } else if (KH*KW <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {
+         const uint64_t ntptg0 = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)/(KH*KW), N);
+ 
+         ggml_metal_encoder_set_pipeline(enc, pipeline);
+diff --git a/src/ggml-metal/kernels/conv.metal b/src/ggml-metal/kernels/conv.metal
+index 5685b5c..624781d 100644
+--- a/src/ggml-metal/kernels/conv.metal
++++ b/src/ggml-metal/kernels/conv.metal
+@@ -64,6 +64,32 @@ kernel void kernel_im2col(
+ template [[host_name("kernel_im2col_f32")]] kernel im2col_t kernel_im2col<float>;
+ template [[host_name("kernel_im2col_f16")]] kernel im2col_t kernel_im2col<half>;
+ 
++// Tile contiguous output columns instead of launching one tiny group per
++// input channel and output position. Works for any 1-D kernel/stride/dilation.
++template <typename T>
++kernel void kernel_im2col_1d(
++        constant ggml_metal_kargs_im2col & args,
++        device const float * x,
++        device char * dst,
++        uint3 tgpig [[threadgroup_position_in_grid]],
++        uint3 tgpg [[threadgroups_per_grid]],
++        uint3 tpitg [[thread_position_in_threadgroup]],
++        uint3 ntg [[threads_per_threadgroup]]) {
++    const uint col = tgpig.x*ntg.x + tpitg.x;
++    if (col >= uint(args.CHW)) {
++        return;
++    }
++    const uint c = col / args.KW;
++    const uint k = col % args.KW;
++    const int64_t iw = int64_t(tgpig.y)*args.s0 + int64_t(k)*args.d0 - args.p0;
++    const uint64_t out = (uint64_t(tgpig.z)*tgpg.y + tgpig.y)*args.CHW + col;
++    ((device T *) dst)[out] = iw >= 0 && iw < args.IW
++        ? T(x[tgpig.z*args.ofs0 + c*args.ofs1 + iw]) : T(0);
++}
++
++template [[host_name("kernel_im2col_1d_f32")]] kernel im2col_t kernel_im2col_1d<float>;
++template [[host_name("kernel_im2col_1d_f16")]] kernel im2col_t kernel_im2col_1d<half>;
++
+ // TODO: optimize
+ typedef void (im2col_ext_t)(
+         constant ggml_metal_kargs_im2col & args,

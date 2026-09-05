@@ -278,7 +278,7 @@ mod tests {
     use crate::ir::{Attr, DType, ValueDesc};
 
     fn desc(name: &str) -> ValueDesc {
-        ValueDesc { name: name.into(), dtype: DType::F32, shape: vec![] }
+        ValueDesc { sequence: false, name: name.into(), dtype: DType::F32, shape: vec![] }
     }
 
     #[test]
@@ -500,7 +500,7 @@ mod attention_tests {
         sm.set_attr_i("axis", -1);
         g.nodes.push(sm);
         g.nodes.push(Node::new("MatMul", "mm2", &["p", "v"], &["y"]));
-        g.outputs.push(ValueDesc { name: "y".into(), dtype: crate::ir::DType::F32, shape: vec![] });
+        g.outputs.push(ValueDesc { sequence: false, name: "y".into(), dtype: crate::ir::DType::F32, shape: vec![] });
         assert_eq!(fuse_attention(&mut g), 1);
         assert_eq!(g.nodes.len(), 1);
         let n = &g.nodes[0];

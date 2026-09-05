@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = ["numpy>=1.26", "onnx>=1.16", "onnxruntime>=1.29,<1.31"]
 # ///
 """Per-op tests: tiny ONNX graphs run on the CPU provider and on ggml, outputs compared.
@@ -569,8 +569,11 @@ def dynamic_int8_matmul():
     # onnxruntime quantize_dynamic output: DynamicQuantizeLinear -> MatMulInteger -> Cast -> Mul(xs*ws)
     k, n = 64, 32
     w = f32(k, n)
-    ws = (np.abs(w).max(axis=0) / 127.0).astype(np.float32)
-    wq = np.clip(np.round(w / ws), -127, 127).astype(np.int8)
+    # ORT's AVX2 U8S8 kernel saturates intermediate int16 sums with full-range
+    # weights. Use its recommended reduce_range (7-bit) input for a portable
+    # reference: https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html
+    ws = (np.abs(w).max(axis=0) / 63.0).astype(np.float32)
+    wq = np.clip(np.round(w / ws), -63, 63).astype(np.int8)
     wzp = np.zeros(n, dtype=np.int8)
     nodes = [
         helper.make_node("DynamicQuantizeLinear", ["x"], ["xq", "xs", "xzp"]),
@@ -582,6 +585,13 @@ def dynamic_int8_matmul():
     inits = [const("wq", wq), const("wzp", wzp), const("ws", ws)]
     # the reference quantises activations to 8 bits; ggml keeps them f32, so ~1% relative differs
     return model(nodes, [tin("x", [1, 5, k])], [tin("y", [1, 5, n])], inits), {"x": f32(1, 5, k)}, 0.25, 0.05
+
+
+import ops_extra  # noqa: E402
+import ops_control  # noqa: E402
+
+ops_extra.register(case, model, tin, const, f32)
+ops_control.register(case, model, tin, const, f32)
 
 
 def run_case(name, fn) -> tuple[bool, list[str]]:
