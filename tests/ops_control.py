@@ -64,9 +64,16 @@ def register(case, model, tin, const, f32):
         return model(nodes, [tin('x', [2])], [tin('y', [3, 2])], inits), {'x': f32(2)}, 0, 0
 
     @case
-    def random_normal_zero_scale():
-        node = helper.make_node('RandomNormalLike', ['x'], ['y'], seed=42., mean=0.25, scale=0.)
-        return model([node], [tin('x', [3, 7])], [tin('y', [3, 7])]), {'x': f32(3, 7)}, 0, 0
+    def random_normal_moments():
+        # Different RNGs must agree statistically. A zero scale aborts inside
+        # ORT's libstdc++ normal_distribution on Linux, so test it in Rust only.
+        nodes = [helper.make_node('RandomNormalLike', ['x'], ['noise'], seed=42., mean=0.25, scale=0.75),
+                 helper.make_node('ReduceMean', ['noise'], ['mean'], keepdims=0),
+                 helper.make_node('Sub', ['noise', 'center'], ['delta']),
+                 helper.make_node('Mul', ['delta', 'delta'], ['square']),
+                 helper.make_node('ReduceMean', ['square'], ['variance'], keepdims=0)]
+        return model(nodes, [tin('x', [256, 256])], [tin('mean', []), tin('variance', [])],
+                     [const('center', np.float32(0.25))]), {'x': f32(256, 256)}, 0.03, 0
 
     @case
     def random_uniform_bounds():

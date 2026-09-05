@@ -69,6 +69,16 @@ mod tests {
     use super::*;
     use crate::ir::Attr;
     #[test]
+    fn zero_scale_is_the_mean() {
+        let x = HostTensor::zeros(DType::F32, vec![3, 7]);
+        let mut n = Node::new("RandomNormalLike", "random", &["x"], &["y"]);
+        n.attrs.insert("mean".into(), Attr::Float(0.25));
+        n.attrs.insert("scale".into(), Attr::Float(0.));
+        let out = Streams::default().eval(&n, &[Some(&x)]).unwrap();
+        assert!(out[0].as_f64().iter().all(|x| *x == 0.25));
+    }
+
+    #[test]
     fn reproducible_streams_advance_and_have_expected_distributions() {
         let x = HostTensor::zeros(DType::F32, vec![100_000]);
         for op in OPS {
