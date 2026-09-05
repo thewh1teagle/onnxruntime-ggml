@@ -47,7 +47,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Install wheel repair tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y patchelf
+        run: |
+          uv tool install patchelf==0.19.1.0
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
       - name: Verify package version
         shell: bash
         env:
